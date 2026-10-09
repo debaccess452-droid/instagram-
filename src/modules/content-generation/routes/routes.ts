@@ -1,0 +1,10 @@
+import { ROUTES } from "@/constants/routes";
+
+export const CG_ROUTES = {
+  HOME: ROUTES.DASHBOARD,
+  GENERATE: ROUTES.GENERATE_CONTENT,
+  PROCESSING: ROUTES.AI_PROCESSING,
+  RESULTS: ROUTES.RESULTS_OVERVIEW,
+};
+
+export default CG_ROUTES;

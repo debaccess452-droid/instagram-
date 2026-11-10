@@ -38,6 +38,7 @@ import { Home } from "@/pages/dashboard/Home/Home";
 import { GenerateContent } from "@/pages/dashboard/GenerateContent/GenerateContent";
 import { AIProcessing } from "@/pages/dashboard/AIProcessing/AIProcessing";
 import { History } from "@/pages/dashboard/History/History";
+import { ContentAnalysis } from "@/pages/dashboard/ContentAnalysis/ContentAnalysis";
 import { Performance } from "@/pages/dashboard/Performance/Performance";
 import { Analytics } from "@/pages/dashboard/Analytics/Analytics";
 import { Profile } from "@/pages/dashboard/Profile/Profile";
@@ -111,6 +112,7 @@ export const AppRoutes: React.FC = () => {
           <Route path={ROUTES.GENERATE_CONTENT} element={<GenerateContent />} />
           <Route path={ROUTES.AI_PROCESSING} element={<AIProcessing />} />
           <Route path={ROUTES.HISTORY} element={<History />} />
+          <Route path={ROUTES.CONTENT_ANALYSIS} element={<ContentAnalysis />} />
           <Route path={ROUTES.PERFORMANCE} element={<Performance />} />
           <Route path={ROUTES.ANALYTICS} element={<Analytics />} />
           <Route path={ROUTES.PROFILE} element={<Profile />} />

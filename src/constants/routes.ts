@@ -36,6 +36,7 @@ export const ROUTES = {
   AI_PROCESSING: "/dashboard/ai-processing",
   HISTORY: "/dashboard/history",
   LIBRARY: "/dashboard/history",
+  CONTENT_ANALYSIS: "/dashboard/content-analysis",
   PERFORMANCE: "/dashboard/performance",
   ANALYTICS: "/dashboard/analytics",
   PROFILE: "/dashboard/profile",

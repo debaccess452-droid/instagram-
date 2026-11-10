@@ -10,16 +10,18 @@ import {
   CreditCard,
   Settings,
   CheckCircle2,
+  ScanSearch,
 } from "lucide-react";
 import { Logo } from "@/components/common";
 import { ROUTES } from "@/constants/routes";
 import { cn } from "@/utils/cn";
 
-const SIDEBAR_ITEMS = [
+export const SIDEBAR_ITEMS = [
   { label: "Dashboard", href: ROUTES.DASHBOARD, icon: LayoutDashboard, end: true },
   { label: "Generate Content", href: ROUTES.GENERATE_CONTENT, icon: Sparkles },
   { label: "Latest Results", href: ROUTES.RESULTS_OVERVIEW, icon: CheckCircle2 },
   { label: "Content Library", href: ROUTES.HISTORY, icon: FolderKanban },
+  { label: "Content Analysis", href: ROUTES.CONTENT_ANALYSIS, icon: ScanSearch },
   { label: "Performance", href: ROUTES.PERFORMANCE, icon: TrendingUp },
   { label: "Analytics", href: ROUTES.ANALYTICS, icon: BarChart3 },
   { label: "Creator DNA", href: ROUTES.PROFILE, icon: Dna },

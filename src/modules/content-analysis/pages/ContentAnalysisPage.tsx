@@ -292,6 +292,7 @@ export const ContentAnalysisPage: React.FC = () => {
               <AudioAnalysis
                 data={currentAnalysis.audioAnalysis}
                 onSeek={handleSeekVideo}
+                isDemoData={Boolean(currentAnalysis.isDemoData)}
               />
             )}
 

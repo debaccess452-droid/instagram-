@@ -35,6 +35,8 @@ export interface BackgroundAudioInfo {
   }>;
   audioSeparationQuality: "excellent" | "good" | "moderate" | "poor";
   syncRating: string;
+  hasMusicDetected?: boolean | "detected" | "not_detected" | "unable_to_determine";
+  musicDescription?: string;
 }
 
 export interface AudioAnalysisData {

@@ -1,5 +1,5 @@
-import React, { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import React, { useState, useEffect } from "react";
+import { useNavigate, Link } from "react-router-dom";
 import {
   AuthCard,
   AuthHeader,
@@ -12,8 +12,10 @@ import {
   FormMessage,
   Divider,
   SocialButton,
+  StatusIcon,
 } from "@/components/auth";
 import { useAuth } from "@/hooks/useAuth";
+import { supabase } from "@/lib/supabase";
 import { ROUTES } from "@/constants/routes";
 
 export const Signup: React.FC = () => {
@@ -27,13 +29,31 @@ export const Signup: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [socialLoading, setSocialLoading] = useState(false);
 
+  // Email verification confirmation states
+  const [signupComplete, setSignupComplete] = useState(false);
+  const [resendLoading, setResendLoading] = useState(false);
+  const [resendSuccess, setResendSuccess] = useState("");
+  const [resendError, setResendError] = useState("");
+  const [resendCooldown, setResendCooldown] = useState(0);
+
   const { signUp, signInWithGoogle } = useAuth();
   const navigate = useNavigate();
+
+  // Cooldown countdown timer
+  useEffect(() => {
+    if (resendCooldown <= 0) return;
+    const interval = setInterval(() => {
+      setResendCooldown((prev) => (prev > 0 ? prev - 1 : 0));
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [resendCooldown]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
     setSuccessMessage("");
+    setResendSuccess("");
+    setResendError("");
 
     if (!name.trim()) {
       setError("Please enter your full name.");
@@ -87,8 +107,9 @@ export const Signup: React.FC = () => {
       setLoading(false);
 
       if (needsEmailConfirmation) {
+        setSignupComplete(true);
         setSuccessMessage(
-          `Confirmation link sent to ${email}. Please check your inbox and confirm your email to activate your account.`
+          `Confirmation link sent to ${email.trim()}. Please check your inbox and confirm your email to activate your account.`
         );
       } else {
         // Direct auto-confirm configured
@@ -97,6 +118,40 @@ export const Signup: React.FC = () => {
     } catch (err: any) {
       setError(err?.message || "An unexpected error occurred during signup.");
       setLoading(false);
+    }
+  };
+
+  const handleResendConfirmation = async () => {
+    if (resendLoading || resendCooldown > 0 || !email) return;
+
+    setResendLoading(true);
+    setResendError("");
+    setResendSuccess("");
+
+    try {
+      const { error: resendErr } = await supabase.auth.resend({
+        type: "signup",
+        email: email.trim(),
+        options: {
+          emailRedirectTo: `${window.location.origin}/verify-email`,
+        },
+      });
+
+      if (resendErr) {
+        setResendError(
+          resendErr.message ||
+            "Unable to resend confirmation email. Please wait a moment and try again."
+        );
+      } else {
+        setResendSuccess(
+          `A new confirmation email has been sent to ${email.trim()}. Please check your inbox.`
+        );
+        setResendCooldown(60);
+      }
+    } catch (err: any) {
+      setResendError(err?.message || "An unexpected error occurred while resending.");
+    } finally {
+      setResendLoading(false);
     }
   };
 
@@ -114,6 +169,60 @@ export const Signup: React.FC = () => {
       setSocialLoading(false);
     }
   };
+
+  if (signupComplete) {
+    return (
+      <AuthCard className="text-center">
+        <StatusIcon variant="email" />
+        <AuthHeader
+          title="Check your email"
+          subtitle={`We sent a confirmation link to ${email}. Click the link in your email to activate your account and start using Virulmuse.`}
+        />
+
+        <div className="space-y-3.5 pt-2 text-left">
+          {successMessage && <FormMessage type="success" message={successMessage} />}
+          {resendSuccess && <FormMessage type="success" message={resendSuccess} />}
+          {resendError && <FormMessage type="error" message={resendError} />}
+
+          <LoadingButton
+            type="button"
+            onClick={handleResendConfirmation}
+            isLoading={resendLoading}
+            loadingText="Resending confirmation email..."
+            disabled={resendLoading || resendCooldown > 0}
+            className="bg-card hover:bg-background-elevated text-text-primary border border-card-border shadow-none"
+          >
+            {resendCooldown > 0
+              ? `Resend available in ${resendCooldown}s`
+              : "Resend Confirmation Email"}
+          </LoadingButton>
+
+          <Link to={ROUTES.LOGIN} className="block">
+            <LoadingButton type="button">
+              Proceed to Sign In
+            </LoadingButton>
+          </Link>
+
+          <div className="text-center pt-2">
+            <button
+              type="button"
+              onClick={() => {
+                setSignupComplete(false);
+                setPassword("");
+                setConfirmPassword("");
+                setSuccessMessage("");
+                setResendSuccess("");
+                setResendError("");
+              }}
+              className="text-xs text-text-secondary hover:text-white transition-colors"
+            >
+              Need to change your email? Back to sign up
+            </button>
+          </div>
+        </div>
+      </AuthCard>
+    );
+  }
 
   return (
     <AuthCard>

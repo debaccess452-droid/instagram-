@@ -24,6 +24,7 @@ export interface AuthContextValue {
   ) => Promise<{ error: AuthError | Error | null; needsEmailConfirmation: boolean }>;
   signOut: () => Promise<{ error: AuthError | Error | null }>;
   resetPasswordForEmail: (email: string) => Promise<{ error: AuthError | Error | null }>;
+  resendConfirmationEmail: (email: string) => Promise<{ error: AuthError | Error | null }>;
   updatePassword: (newPassword: string) => Promise<{ error: AuthError | Error | null }>;
   signInWithGoogle: () => Promise<{ error: AuthError | Error | null }>;
   login: (email: string, name?: string) => void;
@@ -40,6 +41,7 @@ const AuthContext = createContext<AuthContextValue>({
   signUp: async () => ({ error: null, needsEmailConfirmation: false }),
   signOut: async () => ({ error: null }),
   resetPasswordForEmail: async () => ({ error: null }),
+  resendConfirmationEmail: async () => ({ error: null }),
   updatePassword: async () => ({ error: null }),
   signInWithGoogle: async () => ({ error: null }),
   login: () => {},
@@ -200,7 +202,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
           data: {
             display_name: displayName.trim(),
           },
-          emailRedirectTo: `${window.location.origin}${ROUTES.LOGIN}`,
+          emailRedirectTo: `${window.location.origin}${ROUTES.VERIFY_EMAIL}`,
         },
       });
 
@@ -226,6 +228,21 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       return { error: null, needsEmailConfirmation };
     } catch (err: any) {
       return { error: err, needsEmailConfirmation: false };
+    }
+  };
+
+  const resendConfirmationEmail = async (email: string) => {
+    try {
+      const { error } = await supabase.auth.resend({
+        type: "signup",
+        email: email.trim(),
+        options: {
+          emailRedirectTo: `${window.location.origin}${ROUTES.VERIFY_EMAIL}`,
+        },
+      });
+      return { error };
+    } catch (err: any) {
+      return { error: err };
     }
   };
 
@@ -306,6 +323,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         signUp,
         signOut,
         resetPasswordForEmail,
+        resendConfirmationEmail,
         updatePassword,
         signInWithGoogle,
         login,

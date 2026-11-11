@@ -522,7 +522,7 @@ export const DEMO_ANALYSIS_RESULT: ContentAnalysisResult = {
       originalVoiceover: "People think content creation is about posting every single day.",
       exactOnScreenText: "STOP POSTING DAILY 🛑",
       detailedVisualDirection:
-        "Subject leans suddenly forward toward the lens in a minimalist studio; points index finger down to anchor focus. Rapid 1.1x push-in.",
+        "Subject leans forward toward camera in an indoor studio setting; points index finger down to anchor focus.",
       sceneNumber: 1,
       confidenceScore: 99.5
     },
@@ -546,7 +546,7 @@ export const DEMO_ANALYSIS_RESULT: ContentAnalysisResult = {
       originalVoiceover: "...to fry your nervous system.",
       exactOnScreenText: "and killing retention.",
       detailedVisualDirection:
-        "Subject shakes head firmly with furrowed brow; camera snaps with crash-zoom on the word 'nervous'.",
+        "Subject shakes head firmly with intense facial expression on the word 'nervous'.",
       sceneNumber: 2,
       confidenceScore: 98.4
     },
@@ -618,7 +618,7 @@ export const DEMO_ANALYSIS_RESULT: ContentAnalysisResult = {
       originalVoiceover: "...not replace your thoughts.",
       exactOnScreenText: "DON'T REPLACE THOUGHTS",
       detailedVisualDirection:
-        "Dramatic lighting grid tightens; intense unblinking eye contact; open hands gesture forward emphasizing authenticity.",
+        "Subject maintains intense forward eye contact; opens hands outward to emphasize authenticity.",
       sceneNumber: 6,
       confidenceScore: 99.1
     },
@@ -632,8 +632,7 @@ export const DEMO_ANALYSIS_RESULT: ContentAnalysisResult = {
       detailedVisualDirection:
         "Vertical split screen: creator snaps fingers on left, right side cascades 10 generated Reel script cards in fast animation.",
       sceneNumber: 7,
-      confidenceScore: 97.6,
-      uncertaintyNotes: "Audio limiter engaged at 24.1s; voice frequency curve slightly clipped but words verified via phoneme matching"
+      confidenceScore: 97.6
     },
     {
       id: "row-11",

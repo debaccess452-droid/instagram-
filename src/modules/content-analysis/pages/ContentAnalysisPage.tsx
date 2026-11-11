@@ -318,6 +318,7 @@ export const ContentAnalysisPage: React.FC = () => {
                 videoTitle={currentAnalysis.videoTitle}
                 onSeek={handleSeekVideo}
                 onOpenExport={() => setIsExportModalOpen(true)}
+                isDemoData={Boolean(currentAnalysis.isDemoData)}
               />
             )}
 

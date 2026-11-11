@@ -175,18 +175,14 @@ class ContentAnalysisService {
       "Time",
       "Original Voiceover / Audio",
       "Exact On-Screen Text",
-      "Detailed Visual Direction",
-      "Scene #",
-      "Confidence %",
+      "Visual Direction",
     ];
 
     const rows = scriptTable.map((row) => [
       `"${row.timestamp}"`,
       `"${row.originalVoiceover.replace(/"/g, '""')}"`,
-      `"${row.exactOnScreenText.replace(/"/g, '""')}"`,
-      `"${row.detailedVisualDirection.replace(/"/g, '""')}"`,
-      `"${row.sceneNumber}"`,
-      `"${row.confidenceScore}%"`,
+      `"${(row.exactOnScreenText || "No on-screen text detected.").replace(/"/g, '""')}"`,
+      `"${(row.detailedVisualDirection || "No significant visual change detected").replace(/"/g, '""')}"`,
     ]);
 
     const csvContent =
@@ -197,7 +193,7 @@ class ContentAnalysisService {
     const link = document.createElement("a");
     link.setAttribute("href", encodedUri);
     const sanitizedTitle = videoTitle.toLowerCase().replace(/[^a-z0-9]/g, "_");
-    link.setAttribute("download", `${sanitizedTitle}_reel_script_table.csv`);
+    link.setAttribute("download", `${sanitizedTitle}_reel_script_master.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -217,10 +213,13 @@ class ContentAnalysisService {
   }
 
   public formatTableAsMarkdown(scriptTable: ScriptTableRow[]): string {
-    let md = "| Time | Original Voiceover / Audio | Exact On-Screen Text | Detailed Visual Direction |\n";
-    md += "| --- | --- | --- | --- |\n";
+    let md = "| Time | Original Voiceover / Audio | Exact On-Screen Text | Visual Direction |\n";
+    md += "|---|---|---|---|\n";
     scriptTable.forEach((row) => {
-      md += `| ${row.timestamp} | ${row.originalVoiceover} | ${row.exactOnScreenText} | ${row.detailedVisualDirection} |\n`;
+      const vo = row.originalVoiceover.replace(/\|/g, "\\|");
+      const text = (row.exactOnScreenText || "No on-screen text detected.").replace(/\|/g, "\\|");
+      const visual = (row.detailedVisualDirection || "No significant visual change detected").replace(/\|/g, "\\|");
+      md += `| ${row.timestamp} | ${vo} | ${text} | ${visual} |\n`;
     });
     return md;
   }

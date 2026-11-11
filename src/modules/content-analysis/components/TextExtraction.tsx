@@ -23,69 +23,64 @@ interface RelevantTextMeta {
   animation?: string;
 }
 
+function formatPosition(pos: string | undefined): string | undefined {
+  if (!pos) return undefined;
+  const p = pos.toLowerCase();
+  if (p.includes("top")) return "Top";
+  if (p.includes("bottom")) return "Bottom";
+  if (p.includes("lower")) return "Lower third";
+  if (p.includes("left")) return "Left";
+  if (p.includes("right")) return "Right";
+  return undefined; // Standard center position is not necessary to repeat
+}
+
+function formatStyle(desc: string | undefined): string | undefined {
+  if (!desc) return undefined;
+  const styles: string[] = [];
+  if (/bold|heavy|extrabold/i.test(desc)) styles.push("Bold");
+  if (/italic/i.test(desc)) styles.push("Italic");
+  if (/uppercase|all-caps/i.test(desc)) styles.push("Uppercase");
+  if (/handwritten/i.test(desc)) styles.push("Handwritten");
+  if (/outlined/i.test(desc)) styles.push("Outlined");
+  return styles.length > 0 ? styles.join(", ") : undefined;
+}
+
+function formatColor(color: string | undefined): string | undefined {
+  if (!color) return undefined;
+  const matchNamed = color.match(/\(([^)]+)\)/);
+  if (matchNamed && matchNamed[1]) return matchNamed[1];
+  if (/violet|purple/i.test(color)) return "Violet";
+  if (/red/i.test(color)) return "Red";
+  if (/orange/i.test(color)) return "Orange";
+  if (/amber|gold/i.test(color)) return "Amber";
+  if (/green/i.test(color)) return "Green";
+  if (/cyan|blue/i.test(color)) return "Blue";
+  return undefined;
+}
+
+function formatAnimation(isAnimated: boolean, animType: string | undefined): string | undefined {
+  if (!isAnimated || !animType) return undefined;
+  return animType
+    .replace(/\([^)]+\)/g, "")
+    .replace(/elastic|spring|motion blur|continuous|subtle/gi, "")
+    .trim() || undefined;
+}
+
 /**
  * Extracts visible styling and positioning ONLY when relevant to understanding the text.
  * Strictly adheres to rule: never invent font families, numerical sizes, or unobservable effects.
  */
 function getRelevantMetadata(el: OnScreenTextElement): RelevantTextMeta | null {
-  const meta: RelevantTextMeta = {};
+  const position = formatPosition(el.position);
+  const style = formatStyle(el.fontStyleDescription);
+  const color = formatColor(el.textColor);
+  const animation = formatAnimation(el.isAnimated, el.animationType);
 
-  // 1. Position: Show only when non-standard or meaningful for spatial context
-  if (el.position && el.position !== "middle-center") {
-    meta.position = el.position
-      .replace(/-/g, " ")
-      .replace(/\b\w/g, (c) => c.toUpperCase());
-  }
-
-  // 2. Visible Style: Cleanly identify visible bold, italic, uppercase, or outline without font family names
-  if (el.fontStyleDescription) {
-    const desc = el.fontStyleDescription;
-    const styles: string[] = [];
-    if (/bold|heavy|extrabold/i.test(desc)) styles.push("Bold");
-    if (/italic/i.test(desc)) styles.push("Italic");
-    if (/uppercase|all-caps/i.test(desc)) styles.push("Uppercase");
-    if (/monospace/i.test(desc)) styles.push("Monospace");
-    if (/handwritten/i.test(desc)) styles.push("Handwritten");
-    if (/outlined/i.test(desc)) styles.push("Outlined");
-    if (styles.length > 0) {
-      meta.style = styles.join(", ");
-    }
-  }
-
-  // 3. Color: Only when visually distinctive or useful for emphasis
-  if (el.textColor) {
-    const rawColor = el.textColor;
-    const matchNamed = rawColor.match(/\(([^)]+)\)/);
-    if (matchNamed && matchNamed[1]) {
-      meta.color = matchNamed[1];
-    } else if (rawColor.toLowerCase().includes("violet") || rawColor.toLowerCase().includes("purple")) {
-      meta.color = "Violet accent";
-    } else if (rawColor.toLowerCase().includes("red")) {
-      meta.color = "Red accent";
-    } else if (rawColor.toLowerCase().includes("orange")) {
-      meta.color = "Orange CTA";
-    } else if (rawColor.toLowerCase().includes("amber") || rawColor.toLowerCase().includes("gold")) {
-      meta.color = "Amber";
-    } else if (rawColor.toLowerCase().includes("green")) {
-      meta.color = "Green";
-    } else if (rawColor.toLowerCase().includes("cyan") || rawColor.toLowerCase().includes("blue")) {
-      meta.color = "Blue";
-    }
-  }
-
-  // 4. Animation: Only when text visibly moves, appears, or changes
-  if (el.isAnimated && el.animationType) {
-    meta.animation = el.animationType
-      .replace(/\([^)]+\)/g, "")
-      .replace(/elastic|spring|motion blur/gi, "")
-      .trim();
-  }
-
-  if (!meta.position && !meta.style && !meta.color && !meta.animation) {
+  if (!position && !style && !color && !animation) {
     return null;
   }
 
-  return meta;
+  return { position, style, color, animation };
 }
 
 export const TextExtraction: React.FC<TextExtractionProps> = ({

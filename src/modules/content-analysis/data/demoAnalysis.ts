@@ -178,7 +178,8 @@ export const DEMO_ANALYSIS_RESULT: ContentAnalysisResult = {
         composition: "Central vertical framing; head and shoulders occupying top 45% of 9:16 frame",
         objectsAndProps: ["Matte black desk microphone (Shure SM7B clone)", "Warm ambient bulb in background bokeh"],
         transitionIn: "Hard cut from black (instant hook)",
-        storytellingPurpose: "Hook: disrupt passive scrolling with sudden forward momentum and high-contrast facial expression"
+        storytellingPurpose: "Hook: disrupt passive scrolling with sudden forward momentum and high-contrast facial expression",
+        visualDescription: "Opening medium-close-up in indoor studio setting; male presenter in charcoal crewneck leans abruptly toward camera while pointing index finger downward to anchor viewer focus."
       },
       {
         id: "sc-2",
@@ -197,7 +198,8 @@ export const DEMO_ANALYSIS_RESULT: ContentAnalysisResult = {
         composition: "Tight crop on face; jawline to crown fills 70% of frame",
         objectsAndProps: ["Text banner 'FRY YOUR BRAIN' floating mid-chest"],
         transitionIn: "Fast digital punch-in (1.25x scale snap on audio beat)",
-        storytellingPurpose: "Agitate pain point: dramatize the burnout risk to validate the viewer's personal frustration"
+        storytellingPurpose: "Agitate pain point: dramatize the burnout risk to validate the viewer's personal frustration",
+        visualDescription: "Punch-in close-up on presenter raising both open hands in a defensive 'stop' gesture with wide eyes; background accent light shifts to warm amber."
       },
       {
         id: "sc-3",
@@ -216,7 +218,8 @@ export const DEMO_ANALYSIS_RESULT: ContentAnalysisResult = {
         composition: "Re-centered, negative space left open above head for floating graphical badge",
         objectsAndProps: ["3-part framework UI overlay card rendered in Virulmuse dark glass style"],
         transitionIn: "Jump cut back to 1.0x neutral focal length with paper tear SFX",
-        storytellingPurpose: "Promise of value: pivot from critique to actionable blueprint"
+        storytellingPurpose: "Promise of value: pivot from critique to actionable blueprint",
+        visualDescription: "Jump cut back to medium shot; presenter straightens posture, rests hands on desk, and holds up three fingers sequentially (one, two, three)."
       },
       {
         id: "sc-4",
@@ -235,7 +238,8 @@ export const DEMO_ANALYSIS_RESULT: ContentAnalysisResult = {
         composition: "70% screen capture showing Virulmuse Hook Matrix; 30% creator PIP bubble",
         objectsAndProps: ["Virulmuse hook matrix interface", "Mouse click ripple animation"],
         transitionIn: "Smooth lateral slide-in from right",
-        storytellingPurpose: "Tactical proof: prove the workflow is concrete, not abstract advice"
+        storytellingPurpose: "Tactical proof: prove the workflow is concrete, not abstract advice",
+        visualDescription: "Medium shot with software demonstration overlay; presenter visible in lower-right circular bubble, nodding rhythmically while gesturing toward interface."
       },
       {
         id: "sc-5",
@@ -254,7 +258,8 @@ export const DEMO_ANALYSIS_RESULT: ContentAnalysisResult = {
         composition: "Subject placed along left vertical third line, leaving right space for bullet checklist",
         objectsAndProps: ["Desk plant in terracotta pot (monstera deliciosa)", "Warm desk lamp"],
         transitionIn: "Match cut on subject head turn",
-        storytellingPurpose: "Visual discipline rule: demonstrate how visual consistency builds brand equity"
+        storytellingPurpose: "Visual discipline rule: demonstrate how visual consistency builds brand equity",
+        visualDescription: "Low-angle medium shot; presenter seated at wooden desk gestures side-to-side with open palms to contrast differing visual approaches; desk plant visible on right."
       },
       {
         id: "sc-6",
@@ -273,7 +278,8 @@ export const DEMO_ANALYSIS_RESULT: ContentAnalysisResult = {
         composition: "Symmetrical central portrait framing",
         objectsAndProps: ["Floating purple holographic DNA double helix glyph"],
         transitionIn: "Hard jump cut with bass whoosh",
-        storytellingPurpose: "Philosophical anchor: reframe AI as amplification of personal voice rather than generic automation"
+        storytellingPurpose: "Philosophical anchor: reframe AI as amplification of personal voice rather than generic automation",
+        visualDescription: "Close-up portrait framing with purple ambient fill; presenter leans forward and taps right temple with index finger on key concept, then opens hands."
       },
       {
         id: "sc-7",
@@ -292,7 +298,8 @@ export const DEMO_ANALYSIS_RESULT: ContentAnalysisResult = {
         composition: "Vertical 50/50 split with glowing purple dividing line",
         objectsAndProps: ["Speed badge counter: '10 scripts in 4.2s'", "Virulmuse interface"],
         transitionIn: "Whip pan transition with shutter sound",
-        storytellingPurpose: "Outcome demonstration: visualize extreme leverage and time saved"
+        storytellingPurpose: "Outcome demonstration: visualize extreme leverage and time saved",
+        visualDescription: "Split-screen presentation; presenter snaps right-hand fingers while software demo stream appears on right side of frame."
       },
       {
         id: "sc-8",
@@ -311,7 +318,8 @@ export const DEMO_ANALYSIS_RESULT: ContentAnalysisResult = {
         composition: "Central figure with pulsing 'SAVE THIS' button animation below chin level",
         objectsAndProps: ["Instagram save ribbon icon sticker", "Profile bio pointer arrow"],
         transitionIn: "Smooth zoom back to 1.0x with subtle shutter sound",
-        storytellingPurpose: "Call to Action: frictionless next step (save for reference, check link in bio)"
+        storytellingPurpose: "Call to Action: frictionless next step (save for reference, check link in bio)",
+        visualDescription: "Pull-out to wider medium shot; presenter smiles, points directly at the camera lens, and gestures downward toward the bio link location."
       }
     ]
   },

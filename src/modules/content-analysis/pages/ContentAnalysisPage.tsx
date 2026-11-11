@@ -300,6 +300,7 @@ export const ContentAnalysisPage: React.FC = () => {
               <VisualAnalysis
                 data={currentAnalysis.visualAnalysis}
                 onSeek={handleSeekVideo}
+                isDemoData={Boolean(currentAnalysis.isDemoData)}
               />
             )}
 

@@ -72,6 +72,7 @@ export interface VisualScene {
   objectsAndProps: string[];
   transitionIn: string;
   storytellingPurpose: string;
+  visualDescription?: string;
 }
 
 export interface VisualAnalysisData {

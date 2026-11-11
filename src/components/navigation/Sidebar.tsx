@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { Logo } from "@/components/common";
 import { ROUTES } from "@/constants/routes";
+import { useAuth } from "@/hooks/useAuth";
 import { cn } from "@/utils/cn";
 
 export const SIDEBAR_ITEMS = [
@@ -30,6 +31,9 @@ export const SIDEBAR_ITEMS = [
 ];
 
 export const Sidebar: React.FC = () => {
+  const { user } = useAuth();
+  const isPaidPlan = user?.plan === "Creator Pro" || user?.plan === "Studio";
+
   return (
     <aside className="hidden lg:flex lg:w-64 lg:flex-col lg:border-r lg:border-card-border lg:bg-background-elevated">
       <div className="flex h-16 items-center px-6 border-b border-card-border">
@@ -64,13 +68,20 @@ export const Sidebar: React.FC = () => {
         <div className="rounded-md bg-card p-3.5 border border-card-border">
           <div className="flex items-center justify-between text-xs font-medium text-text-primary mb-1.5">
             <span>Monthly Credits</span>
-            <span className="text-primary">74 / 100</span>
+            <span className="text-primary">
+              {isPaidPlan ? "74 / 100" : "10 / 10"}
+            </span>
           </div>
           <div className="h-1.5 w-full rounded-full bg-background overflow-hidden">
-            <div className="h-full w-3/4 rounded-full bg-gradient-primary-trust" />
+            <div
+              className={cn(
+                "h-full rounded-full bg-gradient-primary-trust",
+                isPaidPlan ? "w-3/4" : "w-full"
+              )}
+            />
           </div>
           <p className="mt-2 text-[11px] text-text-muted">
-            Creator Pro Plan · Renews Nov 1
+            {user?.plan ? `${user.plan} Plan` : "Free Plan"}
           </p>
         </div>
       </div>

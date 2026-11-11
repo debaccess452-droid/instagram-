@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import {
   AuthCard,
@@ -15,10 +15,12 @@ import {
 import { useAuth } from "@/hooks/useAuth";
 import { ROUTES } from "@/constants/routes";
 
+const REMEMBERED_EMAIL_KEY = "virulmuse_remembered_email";
+
 export const Login: React.FC = () => {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [rememberMe, setRememberMe] = useState(true);
+  const [rememberEmail, setRememberEmail] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -26,6 +28,19 @@ export const Login: React.FC = () => {
 
   const { signIn, signInWithGoogle } = useAuth();
   const navigate = useNavigate();
+
+  // Load remembered email safely on mount
+  useEffect(() => {
+    try {
+      const savedEmail = localStorage.getItem(REMEMBERED_EMAIL_KEY);
+      if (savedEmail) {
+        setEmail(savedEmail);
+        setRememberEmail(true);
+      }
+    } catch {
+      // Ignore storage errors in restricted contexts
+    }
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -63,6 +78,17 @@ export const Login: React.FC = () => {
         }
         setLoading(false);
         return;
+      }
+
+      // Handle remembered email safely (never store passwords)
+      try {
+        if (rememberEmail) {
+          localStorage.setItem(REMEMBERED_EMAIL_KEY, email.trim());
+        } else {
+          localStorage.removeItem(REMEMBERED_EMAIL_KEY);
+        }
+      } catch {
+        // Ignore storage errors
       }
 
       setSuccess(true);
@@ -126,9 +152,9 @@ export const Login: React.FC = () => {
 
         <div className="flex items-center justify-between text-xs">
           <Checkbox
-            label="Remember me for 30 days"
-            checked={rememberMe}
-            onChange={(e) => setRememberMe(e.target.checked)}
+            label="Remember my email on this device"
+            checked={rememberEmail}
+            onChange={(e) => setRememberEmail(e.target.checked)}
           />
           <Link
             to={ROUTES.FORGOT_PASSWORD}

@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { User, Mail, Shield, LogOut, CheckCircle2 } from "lucide-react";
+import { User, Mail, Shield, LogOut, CheckCircle2, Dna, Compass } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
 import { Button } from "@/components/buttons";
 import { Card } from "@/components/cards";
@@ -67,7 +67,27 @@ export const Account: React.FC = () => {
             <div className="rounded-lg bg-background-elevated p-3 border border-card-border">
               <span className="text-[10px] text-text-muted uppercase font-semibold">Plan Level</span>
               <p className="text-sm font-semibold text-primary mt-1">
-                {user?.plan || "Creator Pro"}
+                {user?.plan || "Free"}
+              </p>
+            </div>
+
+            <div className="rounded-lg bg-background-elevated p-3 border border-card-border">
+              <span className="text-[10px] text-text-muted uppercase font-semibold flex items-center gap-1">
+                <Dna className="h-3 w-3 text-primary" />
+                Creator DNA Score
+              </span>
+              <p className="text-sm font-semibold text-text-primary mt-1">
+                {user?.dnaScore != null ? `${user.dnaScore}% match` : "Not calculated"}
+              </p>
+            </div>
+
+            <div className="rounded-lg bg-background-elevated p-3 border border-card-border">
+              <span className="text-[10px] text-text-muted uppercase font-semibold flex items-center gap-1">
+                <Compass className="h-3 w-3 text-primary" />
+                Content Niche
+              </span>
+              <p className="text-sm font-semibold text-text-primary mt-1">
+                {user?.niche || "Not selected"}
               </p>
             </div>
           </div>

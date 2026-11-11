@@ -46,6 +46,10 @@ const AuthContext = createContext<AuthContextValue>({
   logout: async () => {},
 });
 
+/**
+ * Maps Supabase User to UserProfile without fabricated defaults.
+ * Uses real metadata or undefined for uncalculated values.
+ */
 function mapSupabaseUserToProfile(supabaseUser: User | null): UserProfile | null {
   if (!supabaseUser) return null;
   const metadata = supabaseUser.user_metadata || {};
@@ -65,40 +69,10 @@ function mapSupabaseUserToProfile(supabaseUser: User | null): UserProfile | null
     email: supabaseUser.email || "",
     handle,
     avatarUrl: metadata.avatar_url,
-    dnaScore: metadata.dna_score ?? 92,
-    plan: metadata.plan ?? "Creator Pro",
-    niche: metadata.niche ?? "Tech & Creator Economy",
+    dnaScore: typeof metadata.dna_score === "number" ? metadata.dna_score : undefined,
+    plan: metadata.plan || "Free",
+    niche: metadata.niche || undefined,
   };
-}
-
-async function fetchUserProfile(supabaseUser: User): Promise<UserProfile> {
-  const baseProfile = mapSupabaseUserToProfile(supabaseUser)!;
-  try {
-    const { data: profileData, error } = await supabase
-      .from("profiles")
-      .select("*")
-      .eq("id", supabaseUser.id)
-      .maybeSingle();
-
-    if (profileData && !error) {
-      return {
-        ...baseProfile,
-        name:
-          profileData.display_name ||
-          profileData.full_name ||
-          profileData.name ||
-          baseProfile.name,
-        handle: profileData.handle || baseProfile.handle,
-        avatarUrl: profileData.avatar_url || baseProfile.avatarUrl,
-        dnaScore: profileData.dna_score ?? baseProfile.dnaScore,
-        plan: profileData.plan ?? baseProfile.plan,
-        niche: profileData.niche ?? baseProfile.niche,
-      };
-    }
-  } catch {
-    // If profiles query fails due to RLS or missing table, use baseProfile
-  }
-  return baseProfile;
 }
 
 export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
@@ -107,70 +81,97 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   const [session, setSession] = useState<Session | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
 
+  // 1. Synchronous Auth State Change Listener
   useEffect(() => {
-    let isMounted = true;
-
-    // 1. Initial Session Check
-    supabase.auth
-      .getSession()
-      .then(async ({ data: { session: initialSession }, error }) => {
-        if (!isMounted) return;
-        if (error) {
-          console.warn("[Auth] Initial session error:", error.message);
-        }
-
-        if (initialSession?.user) {
-          setSession(initialSession);
-          setSupabaseUser(initialSession.user);
-          const profile = await fetchUserProfile(initialSession.user);
-          if (isMounted) {
-            setUser(profile);
-            setIsLoading(false);
-          }
-        } else {
-          if (isMounted) {
-            setSession(null);
-            setSupabaseUser(null);
-            setUser(null);
-            setIsLoading(false);
-          }
-        }
-      })
-      .catch((err) => {
-        console.error("[Auth] Failed to initialize session:", err);
-        if (isMounted) {
-          setIsLoading(false);
-        }
-      });
-
-    // 2. Auth State Change Listener
+    // Keep listener purely synchronous: update session and user state immediately
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange(async (event, currentSession) => {
-      if (!isMounted) return;
-
+    } = supabase.auth.onAuthStateChange((_event, currentSession) => {
       setSession(currentSession);
-      setSupabaseUser(currentSession?.user ?? null);
-
-      if (currentSession?.user) {
-        const profile = await fetchUserProfile(currentSession.user);
-        if (isMounted) {
-          setUser(profile);
-          setIsLoading(false);
-        }
-      } else {
-        if (isMounted) {
-          setUser(null);
-          setIsLoading(false);
-        }
-      }
+      const currentUser = currentSession?.user ?? null;
+      setSupabaseUser(currentUser);
+      setUser(mapSupabaseUserToProfile(currentUser));
+      setIsLoading(false);
     });
 
+    // Initial session fallback in case event hasn't fired yet
+    supabase.auth
+      .getSession()
+      .then(({ data: { session: initialSession } }) => {
+        setIsLoading((loading) => {
+          if (loading) {
+            setSession(initialSession);
+            const currentUser = initialSession?.user ?? null;
+            setSupabaseUser(currentUser);
+            setUser(mapSupabaseUserToProfile(currentUser));
+            return false;
+          }
+          return false;
+        });
+      })
+      .catch((err) => {
+        console.warn("[Auth] getSession error:", err);
+        setIsLoading(false);
+      });
+
     return () => {
-      isMounted = false;
       subscription.unsubscribe();
     };
   }, []);
+
+  // 2. Safe Profile Enrichment Outside the Auth Callback
+  // Prevents race conditions and prevents stale profile queries from overwriting newer users
+  useEffect(() => {
+    const currentUserId = supabaseUser?.id;
+    if (!currentUserId) {
+      return;
+    }
+
+    let isCurrent = true;
+
+    async function loadProfile() {
+      try {
+        const { data: profileData, error } = await supabase
+          .from("profiles")
+          .select("*")
+          .eq("id", currentUserId)
+          .maybeSingle();
+
+        if (!isCurrent) return; // Discard stale request if user changed or logged out
+
+        if (profileData && !error) {
+          setUser((prev) => {
+            if (!prev || prev.id !== currentUserId) return prev;
+            return {
+              ...prev,
+              name:
+                profileData.display_name ||
+                profileData.full_name ||
+                profileData.name ||
+                prev.name,
+              handle: profileData.handle || prev.handle,
+              avatarUrl: profileData.avatar_url || prev.avatarUrl,
+              dnaScore:
+                typeof profileData.dna_score === "number"
+                  ? profileData.dna_score
+                  : prev.dnaScore,
+              plan: profileData.plan || prev.plan || "Free",
+              niche: profileData.niche || prev.niche,
+            };
+          });
+        }
+      } catch (err: any) {
+        // Non-blocking: baseProfile remains valid
+        console.warn("[Auth] Profile database sync note:", err?.message || err);
+      }
+    }
+
+    loadProfile();
+
+    return () => {
+      isCurrent = false; // Invalidate pending query on unmount or user change
+    };
+  }, [supabaseUser?.id]);
 
   const signIn = async (email: string, password: string) => {
     try {
@@ -183,13 +184,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         return { error };
       }
 
-      if (data.session?.user) {
-        setSession(data.session);
-        setSupabaseUser(data.session.user);
-        const profile = await fetchUserProfile(data.session.user);
-        setUser(profile);
-      }
-
+      // onAuthStateChange handles session state update synchronously
       return { error: null };
     } catch (err: any) {
       return { error: err };
@@ -213,7 +208,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         return { error, needsEmailConfirmation: false };
       }
 
-      // Check if user already exists in Supabase (identities array is empty in some Supabase setups)
+      // Check if user already exists
       if (
         data.user &&
         Array.isArray(data.user.identities) &&
@@ -227,16 +222,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         };
       }
 
-      // When email confirmation is enabled, session is null
       const needsEmailConfirmation = !data.session;
-
-      if (data.session?.user) {
-        setSession(data.session);
-        setSupabaseUser(data.session.user);
-        const profile = await fetchUserProfile(data.session.user);
-        setUser(profile);
-      }
-
       return { error: null, needsEmailConfirmation };
     } catch (err: any) {
       return { error: err, needsEmailConfirmation: false };
@@ -297,10 +283,9 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     }
   };
 
-  // Compatibility helper
   const login = (email: string, name?: string) => {
     console.warn(
-      "[Auth] `login()` called directly. Prefer `signIn(email, password)` for real Supabase authentication."
+      "[Auth] `login()` is deprecated. Use `signIn(email, password)` for Supabase authentication."
     );
   };
 

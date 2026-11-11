@@ -39,7 +39,9 @@ export const Topbar: React.FC = () => {
 
           <span className="hidden sm:inline-flex items-center gap-1.5 rounded-sm bg-primary/15 px-2.5 py-1 text-xs font-medium text-primary border border-primary/25">
             <Sparkles className="h-3.5 w-3.5" />
-            Personalization Active ({user?.dnaScore ?? 92}% match)
+            {user?.dnaScore != null
+              ? `Personalization Active (${user.dnaScore}% match)`
+              : "Creator DNA: Not calculated"}
           </span>
         </div>
 
@@ -143,11 +145,21 @@ export const Topbar: React.FC = () => {
               <div className="rounded-md bg-card p-3 border border-card-border text-xs">
                 <div className="flex items-center justify-between text-text-primary font-medium mb-1">
                   <span>Monthly Credits</span>
-                  <span className="text-primary">74 / 100</span>
+                  <span className="text-primary">
+                    {user?.plan === "Creator Pro" || user?.plan === "Studio" ? "74 / 100" : "10 / 10"}
+                  </span>
                 </div>
                 <div className="h-1.5 w-full rounded-full bg-background overflow-hidden">
-                  <div className="h-full w-3/4 rounded-full bg-gradient-primary-trust" />
+                  <div
+                    className={cn(
+                      "h-full rounded-full bg-gradient-primary-trust",
+                      user?.plan === "Creator Pro" || user?.plan === "Studio" ? "w-3/4" : "w-full"
+                    )}
+                  />
                 </div>
+                <p className="mt-2 text-[11px] text-text-muted">
+                  {user?.plan ? `${user.plan} Plan` : "Free Plan"}
+                </p>
               </div>
             </div>
           </div>

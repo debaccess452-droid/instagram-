@@ -9,6 +9,8 @@
 node_modules/
 .pnp
 .pnp.js
+bun.lock
+bun.lockb
 
 # Production build outputs
 dist/

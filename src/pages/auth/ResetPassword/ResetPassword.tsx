@@ -35,14 +35,21 @@ export const ResetPassword: React.FC = () => {
         if (!isMounted) return;
 
         if (sessionError || !session) {
-          // Check if hash has error from Supabase
-          const hash = window.location.hash;
-          if (hash.includes("error_description")) {
-            const params = new URLSearchParams(hash.replace("#", "?"));
-            const desc = params.get("error_description");
-            setError(desc ? decodeURIComponent(desc) : "Password recovery link has expired or is invalid.");
+          // Check if hash or search query has error from Supabase
+          const hash = window.location.hash || "";
+          const search = window.location.search || "";
+          const combinedParams = new URLSearchParams(
+            (hash.replace(/^#/, "").replace(/^\?/, "")) + "&" + search.replace(/^\?/, "")
+          );
+          const desc = combinedParams.get("error_description");
+          const errCode = combinedParams.get("error_code") || combinedParams.get("error");
+
+          if (desc) {
+            setError(decodeURIComponent(desc).replace(/\+/g, " "));
+          } else if (errCode) {
+            setError("Password recovery link has expired or is invalid. Please request a new reset link.");
           } else {
-            setError("No active recovery session found. Please request a new password reset link.");
+            setError("No active password recovery session found. Please request a new password reset link.");
           }
           setHasValidSession(false);
         } else {

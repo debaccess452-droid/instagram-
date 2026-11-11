@@ -124,6 +124,7 @@ export interface EditingTimelineEvent {
   seconds: number;
   editingAction: string;
   observableResult: string;
+  evidenceStatus?: "Observed" | "Estimated" | "Unable to determine";
 }
 
 export interface CutTransitionItem {
@@ -131,6 +132,7 @@ export interface CutTransitionItem {
   seconds: number;
   transitionType: string;
   description: string;
+  evidenceStatus?: "Observed" | "Estimated" | "Unable to determine";
 }
 
 export interface TextGraphicEditingItem {
@@ -139,6 +141,7 @@ export interface TextGraphicEditingItem {
   exactExtractedText?: string;
   presentationType: "Kinetic Word Pop" | "Title Banner" | "Lower Third" | "Call to Action" | "Split Screen Label" | "Static Overlay";
   description: string;
+  evidenceStatus?: "Observed" | "Estimated" | "Unable to determine";
 }
 
 export interface VisualEffectItem {
@@ -146,6 +149,7 @@ export interface VisualEffectItem {
   seconds?: number;
   technique: string;
   observableDetails: string;
+  evidenceStatus?: "Observed" | "Estimated" | "Unable to determine";
 }
 
 export interface AudioEditingItem {
@@ -153,6 +157,7 @@ export interface AudioEditingItem {
   seconds?: number;
   audioElement: "Voiceover Edit" | "Music Bed Ducking" | "Sound Effect Sync" | "Pacing / Breath Removal" | "Volume Accent";
   observableDetails: string;
+  evidenceStatus?: "Observed" | "Estimated" | "Unable to determine";
 }
 
 export interface EditingTechnicalDetails {

@@ -2,7 +2,6 @@ import React, { useState } from "react";
 import {
   Scissors,
   Activity,
-  Type,
   Layers,
   Volume2,
   Clock,
@@ -13,10 +12,10 @@ import {
   Search,
   CheckCircle2,
   Sparkles,
-  ArrowRight,
   ShieldCheck,
   Eye,
-  Film,
+  AlertCircle,
+  HelpCircle,
 } from "lucide-react";
 import {
   EditingBreakdownData,
@@ -37,6 +36,31 @@ export interface EditingBreakdownProps {
   isDemoData?: boolean;
 }
 
+function renderEvidenceBadge(status?: "Observed" | "Estimated" | "Unable to determine") {
+  if (status === "Unable to determine") {
+    return (
+      <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-slate-400 bg-slate-500/10 px-2 py-0.5 rounded border border-slate-500/20">
+        <HelpCircle className="h-2.5 w-2.5" />
+        Unable to determine
+      </span>
+    );
+  }
+  if (status === "Estimated") {
+    return (
+      <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/20">
+        <AlertCircle className="h-2.5 w-2.5" />
+        Estimated
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20">
+      <CheckCircle2 className="h-2.5 w-2.5" />
+      Observed
+    </span>
+  );
+}
+
 export const EditingBreakdown: React.FC<EditingBreakdownProps> = ({
   data,
   videoTitle = "Analyzed Reel",
@@ -47,7 +71,7 @@ export const EditingBreakdown: React.FC<EditingBreakdownProps> = ({
   const [copiedTimeline, setCopiedTimeline] = useState(false);
   const [copiedRowIdx, setCopiedRowIdx] = useState<number | null>(null);
 
-  // Fallbacks ensuring robust rendering even if older data objects are supplied
+  // Fallbacks ensuring robust rendering strictly adhering to observable evidence
   const cuts: CutTransitionItem[] =
     data.cutsAndTransitions && data.cutsAndTransitions.length > 0
       ? data.cutsAndTransitions
@@ -56,20 +80,21 @@ export const EditingBreakdown: React.FC<EditingBreakdownProps> = ({
           seconds: cut.seconds,
           transitionType:
             data.pacing.transitionTypes?.[idx % (data.pacing.transitionTypes.length || 1)]?.type ||
-            "Hard Jump Cut",
+            "Hard Cut",
           description: `Observable scene transition cut at timestamp ${cut.timestamp}.`,
+          evidenceStatus: "Observed",
         }));
 
   const pacingInfo = data.pacingAndRhythmDetails || {
     rhythmDescription:
-      "Fast-paced, high-retention editing cadence. Cuts occur at an average interval of 2.1 seconds, creating continuous visual re-engagement without disorienting the viewer.",
-    averageShotDurationSeconds: data.pacing?.averageShotDurationSeconds || 2.1,
+      "Fast-paced editing overall, with 8 distinct shots across 28.5 seconds. Average shot duration is approximately 3.6 seconds based on detected cut timestamps.",
+    averageShotDurationSeconds: data.pacing?.averageShotDurationSeconds || 3.6,
     rapidCutSequences:
-      "Opening hook (00:00–00:03.9) features 3 rapid visual transitions in 3.9 seconds (~1.3s per cut) designed to stop vertical feed scroll velocity.",
+      "Opening hook (00:00–00:03.9) contains the fastest cutting with two shots averaging approximately 1.9 seconds each.",
     uninterruptedShots:
-      "Tactical demonstration (00:07.4–00:15.6) maintains longer screen demonstration (3.8s and 4.4s shots) to allow viewers to absorb interface workflow.",
+      "The longest continuous shots occur during the software demonstration and explanation (00:07.4–00:11.2 at 3.8s, and 00:15.6–00:21.0 at 5.4s).",
     speechRelation:
-      "Every cut coincides exactly with spoken thought conclusions and punchlines. Breath intakes and vocal pauses are eliminated through micro-edits, ensuring relentless pacing.",
+      "Visual cuts coincide with the end of spoken phrases and transitions between topics.",
   };
 
   const textGraphics: TextGraphicEditingItem[] =
@@ -81,56 +106,64 @@ export const EditingBreakdown: React.FC<EditingBreakdownProps> = ({
             seconds: 0.0,
             exactExtractedText: "STOP POSTING DAILY 🛑",
             presentationType: "Kinetic Word Pop",
-            description: "High-contrast white and red sans-serif banner with animated scale pop bounce at top-center.",
+            description: "High-contrast text appears at top-center with scale bounce animation.",
+            evidenceStatus: "Observed",
           },
           {
             timestamp: "00:01.8–00:03.9",
             seconds: 1.8,
             exactExtractedText: "it's frying your brain and killing retention.",
             presentationType: "Kinetic Word Pop",
-            description: "Rapid kinetic typography timed word-by-word with speech cadence across center frame.",
+            description: "Center animated text appearing in sequence with spoken words.",
+            evidenceStatus: "Observed",
           },
           {
             timestamp: "00:03.9–00:07.4",
             seconds: 3.9,
             exactExtractedText: "The 3-Step Creator DNA Method",
             presentationType: "Title Banner",
-            description: "Top-edge slide-down title card in high-contrast neon violet pill container.",
+            description: "Top-center title card sliding into frame.",
+            evidenceStatus: "Observed",
           },
           {
             timestamp: "00:07.4–00:11.2",
             seconds: 7.4,
             exactExtractedText: "STEP 1: Batch Hook Archetypes 🎣",
             presentationType: "Lower Third",
-            description: "Animated lower-third badge with dark backdrop and hook icon highlighting step 1.",
+            description: "Lower-third banner displayed during step 1 description.",
+            evidenceStatus: "Observed",
           },
           {
             timestamp: "00:11.2–00:15.6",
             seconds: 11.2,
             exactExtractedText: "STEP 2: Lock 1 Visual Anchor 🎥",
             presentationType: "Lower Third",
-            description: "Sequential lower-third badge replacement with camera icon highlighting step 2.",
+            description: "Lower-third banner displayed during step 2 description.",
+            evidenceStatus: "Observed",
           },
           {
             timestamp: "00:15.6–00:18.2",
             seconds: 15.6,
             exactExtractedText: "STEP 3: Replicate Voice",
             presentationType: "Lower Third",
-            description: "Lower-third badge displaying final step in workflow progression.",
+            description: "Lower-third banner displayed during step 3 description.",
+            evidenceStatus: "Observed",
           },
           {
             timestamp: "00:21.0–00:23.5",
             seconds: 21.0,
             exactExtractedText: "⚡ 10 Variations in 4 Seconds",
             presentationType: "Split Screen Label",
-            description: "High-energy top-center headline banner with pulsing highlight effect.",
+            description: "Banner displayed at top of split-screen scene.",
+            evidenceStatus: "Observed",
           },
           {
             timestamp: "00:25.2–00:28.5",
             seconds: 25.2,
             exactExtractedText: "SAVE THIS REEL 📌 link in bio for template",
             presentationType: "Call to Action",
-            description: "Prominent bottom-center card with bookmark pin icon and high-contrast call to action.",
+            description: "Call-to-action overlay displayed at bottom of frame.",
+            evidenceStatus: "Observed",
           },
         ];
 
@@ -139,37 +172,42 @@ export const EditingBreakdown: React.FC<EditingBreakdownProps> = ({
       ? data.visualEffectsAndLayering
       : [
           {
-            technique: "Color Grading & Lighting Contrast",
+            technique: "Visual Styling & Lighting",
             observableDetails:
-              "High-contrast color grading with deep shadow rolloff and warm amber skin tones. Background wall accent lighting shifts visibly from slate to violet at 00:03.9.",
+              "Warm frontal light on subject against dark blue background. Specific grading profile or equipment is unable to determine from video stream.",
+            evidenceStatus: "Unable to determine",
           },
           {
             timestamp: "00:07.4–00:11.2",
             seconds: 7.4,
             technique: "Picture-in-Picture Multi-Layer Layout",
             observableDetails:
-              "Composites recorded software screen with rounded corners and drop shadow behind a circular subject cutout positioned in the lower-left corner.",
+              "Full-bleed screen capture with rounded corners and drop shadow; presenter shown in circular lower-left picture-in-picture window.",
+            evidenceStatus: "Observed",
           },
           {
             timestamp: "00:21.0–00:25.2",
             seconds: 21.0,
             technique: "Vertical Split-Screen Composition",
             observableDetails:
-              "Vertical 50/50 dual pane split cleanly separates live human reaction on the left from automated software generation on the right with a 2px divider line.",
+              "Vertical split-screen cleanly dividing the frame into two halves: subject reaction on left and software screen on right.",
+            evidenceStatus: "Observed",
           },
           {
             timestamp: "00:04.5",
             seconds: 4.5,
             technique: "Motion Graphic Overlays",
             observableDetails:
-              "Semi-transparent glassmorphism card overlays and animated DNA double-helix line graphic floating beside subject.",
+              "Semi-transparent card overlay and animated stylized line graphic displayed beside subject.",
+            evidenceStatus: "Observed",
           },
           {
             timestamp: "00:01.8",
             seconds: 1.8,
-            technique: "Digital Punch-In & Crop",
+            technique: "Digital Punch-In",
             observableDetails:
-              "Instant 1.25x digital scale punch-in without optical lens zoom executed at 00:01.8 and 00:11.2 to increase rhetorical emphasis.",
+              "Digital cropping executed at 00:01.8 and 00:11.2 to change framing without optical camera movement.",
+            evidenceStatus: "Observed",
           },
         ];
 
@@ -180,51 +218,58 @@ export const EditingBreakdown: React.FC<EditingBreakdownProps> = ({
           {
             audioElement: "Voiceover Edit",
             observableDetails:
-              "Relentless vocal continuity with silences under 0.15s removed. Speech hesitations, pauses, and breath sounds are fully cut out.",
+              "Voiceover dialogue is edited together tightly with minimal silent pauses between phrases.",
+            evidenceStatus: "Observed",
           },
           {
             audioElement: "Music Bed Ducking",
             observableDetails:
-              "Subdued trap beat ducks by approximately 6–8 dB beneath the voiceover during dialogue, then swells during cut transitions at 00:03.9 and 00:21.0.",
+              "Background music volume lowers audibly while speech is active, and increases slightly during cuts.",
+            evidenceStatus: "Observed",
           },
           {
             timestamp: "00:00.8",
             seconds: 0.8,
             audioElement: "Sound Effect Sync",
-            observableDetails:
-              "Subdued whoosh riser anticipation accompanying the 'STOP POSTING DAILY 🛑' text pop-in.",
+            observableDetails: "Audible whoosh sound effect plays as opening text appears.",
+            evidenceStatus: "Observed",
           },
           {
             timestamp: "00:03.2",
             seconds: 3.2,
             audioElement: "Sound Effect Sync",
-            observableDetails:
-              "Subtle impact click synchronized with 'killing retention.' kinetic text flash.",
+            observableDetails: "Audible click sound effect plays on phrase emphasis.",
+            evidenceStatus: "Observed",
           },
           {
             timestamp: "00:07.1",
             seconds: 7.1,
             audioElement: "Sound Effect Sync",
-            observableDetails: "Low sub-bass drop marking transition into screen demonstration.",
+            observableDetails:
+              "Audible low sub-bass sound plays at transition into software demonstration.",
+            evidenceStatus: "Observed",
           },
           {
             timestamp: "00:11.4",
             seconds: 11.4,
             audioElement: "Sound Effect Sync",
-            observableDetails: "Paper slide sound effect aligned with Step 2 lower-third appearance.",
+            observableDetails: "Audible slide sound effect plays as step 2 card appears.",
+            evidenceStatus: "Observed",
           },
           {
             timestamp: "00:20.5",
             seconds: 20.5,
             audioElement: "Sound Effect Sync",
-            observableDetails: "High-frequency digital chime / ping marking the variation counter reveal.",
+            observableDetails: "Audible digital chime sound plays as variation counter appears.",
+            evidenceStatus: "Observed",
           },
           {
             timestamp: "00:25.0",
             seconds: 25.0,
             audioElement: "Pacing / Breath Removal",
             observableDetails:
-              "Brief 0.2s intentional audio ducking / micro-silence preceding the call to action, creating auditory punctuation.",
+              "Audible brief pause in voiceover dialogue before the final call to action.",
+            evidenceStatus: "Observed",
           },
         ];
 
@@ -235,65 +280,74 @@ export const EditingBreakdown: React.FC<EditingBreakdownProps> = ({
           {
             timestamp: "00:00.0–00:01.8",
             seconds: 0.0,
-            editingAction: "Opening Hard Cut & Text Pop-In",
+            editingAction: "Opening Cut & Text Appearance",
             observableResult:
-              "Medium close-up appears; red/white 'STOP POSTING DAILY 🛑' text bounces into top-center; trap beat intro with subdued whoosh riser.",
+              "Medium close-up of subject; 'STOP POSTING DAILY 🛑' text appears at top-center; background music starts with audible whoosh sound.",
+            evidenceStatus: "Observed",
           },
           {
             timestamp: "00:01.8–00:03.9",
             seconds: 1.8,
-            editingAction: "Digital Punch-In & Kinetic Typography",
+            editingAction: "Digital Punch-In & Animated Text",
             observableResult:
-              "Instant 1.25x scale punch-in to close-up; kinetic text 'it's frying your brain' and 'and killing retention.' flashes word-by-word; subtle impact click sound.",
+              "Framing crops closer to subject; 'it's frying your brain and killing retention.' text animates; audible click sound.",
+            evidenceStatus: "Observed",
           },
           {
             timestamp: "00:03.9–00:07.4",
             seconds: 3.9,
-            editingAction: "Hard Cut & Top Title Slide",
+            editingAction: "Hard Cut & Top Title Card",
             observableResult:
-              "Cut to desk medium framing; violet 'The 3-Step Creator DNA Method' banner slides down from top; floating DNA line graphic animates.",
+              "Cut to medium desk view; 'The 3-Step Creator DNA Method' banner slides down; graphic overlay appears.",
+            evidenceStatus: "Observed",
           },
           {
             timestamp: "00:07.4–00:11.2",
             seconds: 7.4,
-            editingAction: "PiP Screen Recording Transition & Lower Third",
+            editingAction: "PiP Screen Transition & Lower Third",
             observableResult:
-              "Subject scales into lower-left circular PiP; full-frame screen recording appears; 'STEP 1: Batch Hook Archetypes 🎣' lower third slides in with bass sub drop.",
+              "Transition to desktop screen capture with subject in circular picture-in-picture; 'STEP 1: Batch Hook Archetypes 🎣' appears with low sub sound.",
+            evidenceStatus: "Observed",
           },
           {
             timestamp: "00:11.2–00:15.6",
             seconds: 11.2,
-            editingAction: "Digital Scale Snap & Step 2 Graphic",
+            editingAction: "Digital Punch-In & Step 2 Graphic",
             observableResult:
-              "Screen recording zooms 1.15x onto workflow canvas; lower-third transitions to 'STEP 2: Lock 1 Visual Anchor 🎥' with paper slide sound effect.",
+              "Framing punches in closer on screen capture; lower-third updates to 'STEP 2: Lock 1 Visual Anchor 🎥' with audible slide sound.",
+            evidenceStatus: "Observed",
           },
           {
             timestamp: "00:15.6–00:21.0",
             seconds: 15.6,
-            editingAction: "Hard Cut back to A-Roll & Accent Shift",
+            editingAction: "Hard Cut & Step 3 Graphic",
             observableResult:
-              "Cut back to primary subject talking head; lower third updates to 'STEP 3: Replicate Voice'; background violet accent lighting becomes visible.",
+              "Cut back to subject talking head; lower-third updates to 'STEP 3: Replicate Voice'.",
+            evidenceStatus: "Observed",
           },
           {
             timestamp: "00:21.0–00:25.0",
             seconds: 21.0,
-            editingAction: "Split-Screen Composite & Kinetic Counter",
+            editingAction: "Split-Screen Cut & Headline",
             observableResult:
-              "Vertical 50/50 dual pane cut; '⚡ 10 Variations in 4 Seconds' banner pulses at top; digital chime sound effect plays as dashboard results scroll.",
+              "Vertical split-screen cut showing subject on left and screen demonstration on right; '⚡ 10 Variations in 4 Seconds' banner appears with audible chime.",
+            evidenceStatus: "Observed",
           },
           {
             timestamp: "00:25.0–00:25.2",
             seconds: 25.0,
-            editingAction: "Intentional Audio Beat Drop / Micro-Silence",
+            editingAction: "Voiceover Dialogue Pause",
             observableResult:
-              "Music rhythm cuts out for 0.2s; creates auditory punctuation before concluding statement.",
+              "Brief pause in voiceover dialogue preceding the concluding call to action.",
+            evidenceStatus: "Observed",
           },
           {
             timestamp: "00:25.2–00:28.5",
             seconds: 25.2,
-            editingAction: "Whip Swipe Transition & CTA Overlay",
+            editingAction: "Motion Swipe Cut & CTA Card",
             observableResult:
-              "Motion swipe cut to wide medium shot; 'SAVE THIS REEL 📌 link in bio for template' pill badge appears at bottom-center; music bed fades gently to close.",
+              "Horizontal swipe transition to wider framing; 'SAVE THIS REEL 📌 link in bio for template' overlay appears; music fades to conclusion.",
+            evidenceStatus: "Observed",
           },
         ];
 
@@ -325,7 +379,7 @@ export const EditingBreakdown: React.FC<EditingBreakdownProps> = ({
   });
 
   return (
-    <div className="space-y-7">
+    <div className="space-y-6">
       {/* Step 5 Master Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-card-border/80 pb-4">
         <div>
@@ -358,6 +412,16 @@ export const EditingBreakdown: React.FC<EditingBreakdownProps> = ({
           )}
         </div>
       </div>
+
+      {/* Demo Analysis Transparency Notice */}
+      {isDemoData && (
+        <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-2.5 flex items-start gap-2.5 text-xs text-amber-300">
+          <ShieldCheck className="h-4 w-4 shrink-0 mt-0.5 text-amber-400" />
+          <div className="leading-relaxed">
+            <strong className="font-semibold text-amber-200">Demo Analysis Mode:</strong> This reference analysis is simulated from sample media for testing and preview. It does not represent real-time measurements of an uploaded video.
+          </div>
+        </div>
+      )}
 
       {/* ────────────────────────────────────────────────────────────────────────
           COMPONENT 1: Cut and Transition Analysis
@@ -412,10 +476,7 @@ export const EditingBreakdown: React.FC<EditingBreakdownProps> = ({
 
               <div className="pt-2 border-t border-card-border/50 flex items-center justify-between text-[10px] text-text-muted">
                 <span>Transition #{idx + 1}</span>
-                <span className="text-emerald-400 font-medium flex items-center gap-1">
-                  <CheckCircle2 className="h-2.5 w-2.5" />
-                  Observable
-                </span>
+                {renderEvidenceBadge(cut.evidenceStatus)}
               </div>
             </div>
           ))}
@@ -434,8 +495,8 @@ export const EditingBreakdown: React.FC<EditingBreakdownProps> = ({
             <div>
               <h3 className="text-sm font-bold text-text-primary flex items-center gap-2">
                 Editing Pace and Rhythm
-                <span className="text-[10px] uppercase font-bold text-cta bg-cta/10 px-2 py-0.5 rounded border border-cta/20">
-                  High Retention Cadence
+                <span className="text-[10px] uppercase font-bold text-text-secondary bg-background-elevated px-2 py-0.5 rounded border border-card-border">
+                  Fast-Paced Editing Rhythm
                 </span>
               </h3>
               <p className="text-[11px] text-text-muted">
@@ -466,15 +527,16 @@ export const EditingBreakdown: React.FC<EditingBreakdownProps> = ({
                 <Activity className="h-3.5 w-3.5 text-cta" />
                 Rapid Sequence of Cuts
               </span>
-              <span className="text-[10px] font-mono font-bold text-cta bg-cta/15 px-1.5 py-0.5 rounded">
-                ~1.3s / cut
+              <span className="text-[10px] font-mono font-bold text-text-secondary bg-background-elevated px-1.5 py-0.5 rounded border border-card-border">
+                ~1.9s avg
               </span>
             </div>
             <p className="text-xs text-text-secondary leading-relaxed">
               {pacingInfo.rapidCutSequences}
             </p>
-            <div className="pt-2 border-t border-card-border/50 text-[10px] text-text-muted">
-              Location: Opening Hook (<button type="button" onClick={() => onSeek(0)} className="text-primary hover:underline font-mono">00:00–00:03.9</button>)
+            <div className="pt-2 border-t border-card-border/50 flex items-center justify-between text-[10px] text-text-muted">
+              <span>Opening Hook (<button type="button" onClick={() => onSeek(0)} className="text-primary hover:underline font-mono">00:00–00:03.9</button>)</span>
+              {renderEvidenceBadge("Observed")}
             </div>
           </div>
 
@@ -485,15 +547,16 @@ export const EditingBreakdown: React.FC<EditingBreakdownProps> = ({
                 <Clock className="h-3.5 w-3.5 text-trust" />
                 Uninterrupted Hold Shots
               </span>
-              <span className="text-[10px] font-mono font-bold text-trust bg-trust/15 px-1.5 py-0.5 rounded">
-                ~4.1s hold
+              <span className="text-[10px] font-mono font-bold text-text-secondary bg-background-elevated px-1.5 py-0.5 rounded border border-card-border">
+                3.8s–5.4s hold
               </span>
             </div>
             <p className="text-xs text-text-secondary leading-relaxed">
               {pacingInfo.uninterruptedShots}
             </p>
-            <div className="pt-2 border-t border-card-border/50 text-[10px] text-text-muted">
-              Location: Demonstration (<button type="button" onClick={() => onSeek(7.4)} className="text-primary hover:underline font-mono">00:07.4–00:15.6</button>)
+            <div className="pt-2 border-t border-card-border/50 flex items-center justify-between text-[10px] text-text-muted">
+              <span>Demonstration (<button type="button" onClick={() => onSeek(7.4)} className="text-primary hover:underline font-mono">00:07.4–00:15.6</button>)</span>
+              {renderEvidenceBadge("Observed")}
             </div>
           </div>
 
@@ -502,17 +565,18 @@ export const EditingBreakdown: React.FC<EditingBreakdownProps> = ({
             <div className="flex items-center justify-between">
               <span className="text-[11px] font-bold text-text-primary flex items-center gap-1.5">
                 <Sparkles className="h-3.5 w-3.5 text-primary" />
-                Speech & Sentence Alignment
+                Sentence Boundary Alignment
               </span>
-              <span className="text-[10px] font-mono font-bold text-emerald-400 bg-emerald-500/10 px-1.5 py-0.5 rounded">
-                Syntactic Lock
+              <span className="text-[10px] font-mono font-bold text-text-secondary bg-background-elevated px-1.5 py-0.5 rounded border border-card-border">
+                Phrase Cuts
               </span>
             </div>
             <p className="text-xs text-text-secondary leading-relaxed">
               {pacingInfo.speechRelation}
             </p>
-            <div className="pt-2 border-t border-card-border/50 text-[10px] text-text-muted">
-              Micro-silences (&lt;0.15s) spliced out cleanly
+            <div className="pt-2 border-t border-card-border/50 flex items-center justify-between text-[10px] text-text-muted">
+              <span>Pauses between phrases removed</span>
+              {renderEvidenceBadge("Observed")}
             </div>
           </div>
         </div>
@@ -559,22 +623,25 @@ export const EditingBreakdown: React.FC<EditingBreakdownProps> = ({
                   <Play className="h-2.5 w-2.5 fill-current" />
                   <span>{item.timestamp}</span>
                 </button>
-                <span
-                  className={cn(
-                    "text-[10px] font-bold px-2 py-0.5 rounded border uppercase tracking-wider",
-                    item.presentationType === "Kinetic Word Pop"
-                      ? "bg-rose-500/10 text-rose-300 border-rose-500/20"
-                      : item.presentationType === "Title Banner"
-                      ? "bg-purple-500/10 text-purple-300 border-purple-500/20"
-                      : item.presentationType === "Lower Third"
-                      ? "bg-blue-500/10 text-blue-300 border-blue-500/20"
-                      : item.presentationType === "Call to Action"
-                      ? "bg-amber-500/10 text-amber-300 border-amber-500/20"
-                      : "bg-emerald-500/10 text-emerald-300 border-emerald-500/20"
-                  )}
-                >
-                  {item.presentationType}
-                </span>
+                <div className="flex items-center gap-1.5">
+                  <span
+                    className={cn(
+                      "text-[10px] font-bold px-2 py-0.5 rounded border uppercase tracking-wider",
+                      item.presentationType === "Kinetic Word Pop"
+                        ? "bg-rose-500/10 text-rose-300 border-rose-500/20"
+                        : item.presentationType === "Title Banner"
+                        ? "bg-purple-500/10 text-purple-300 border-purple-500/20"
+                        : item.presentationType === "Lower Third"
+                        ? "bg-blue-500/10 text-blue-300 border-blue-500/20"
+                        : item.presentationType === "Call to Action"
+                        ? "bg-amber-500/10 text-amber-300 border-amber-500/20"
+                        : "bg-emerald-500/10 text-emerald-300 border-emerald-500/20"
+                    )}
+                  >
+                    {item.presentationType}
+                  </span>
+                  {renderEvidenceBadge(item.evidenceStatus)}
+                </div>
               </div>
 
               {/* Exact Extracted Text reference */}
@@ -596,7 +663,7 @@ export const EditingBreakdown: React.FC<EditingBreakdownProps> = ({
       </div>
 
       {/* ────────────────────────────────────────────────────────────────────────
-          COMPONENT 4: Visual Effects and Layering (Observable Only, No LUT Names)
+          COMPONENT 4: Visual Effects and Layering (Observable Only, No Guesses)
           ──────────────────────────────────────────────────────────────────────── */}
       <div className="rounded-xl border border-card-border bg-card p-5 shadow-card space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-card-border/70 pb-3">
@@ -607,12 +674,12 @@ export const EditingBreakdown: React.FC<EditingBreakdownProps> = ({
             <div>
               <h3 className="text-sm font-bold text-text-primary flex items-center gap-2">
                 Visual Effects and Layering
-                <span className="text-[10px] uppercase font-bold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20">
+                <span className="text-[10px] uppercase font-bold text-text-secondary bg-background-elevated px-2 py-0.5 rounded border border-card-border">
                   Visible Results Only
                 </span>
               </h3>
               <p className="text-[11px] text-text-muted">
-                Multi-layer compositing, split screens, picture-in-picture, and observable color contrast (no software or LUT guesses)
+                Multi-layer compositing, split screens, picture-in-picture, and observable visual styling without software assumptions
               </p>
             </div>
           </div>
@@ -648,9 +715,9 @@ export const EditingBreakdown: React.FC<EditingBreakdownProps> = ({
                 {fx.observableDetails}
               </p>
 
-              <div className="pt-2 border-t border-card-border/50 text-[10px] text-emerald-400 font-medium flex items-center gap-1">
-                <CheckCircle2 className="h-2.5 w-2.5" />
-                Observable Result Confirmed
+              <div className="pt-2 border-t border-card-border/50 flex items-center justify-between text-[10px] text-text-muted">
+                <span>Technique #{idx + 1}</span>
+                {renderEvidenceBadge(fx.evidenceStatus)}
               </div>
             </div>
           ))}
@@ -674,7 +741,7 @@ export const EditingBreakdown: React.FC<EditingBreakdownProps> = ({
                 </span>
               </h3>
               <p className="text-[11px] text-text-muted">
-                Voiceover continuity, music ducking levels, sound effect alignment with cuts, and intentional silences
+                Voiceover cuts, audible music ducking, and sound effects aligned with visual changes
               </p>
             </div>
           </div>
@@ -711,11 +778,8 @@ export const EditingBreakdown: React.FC<EditingBreakdownProps> = ({
               </p>
 
               <div className="pt-2 border-t border-card-border/50 text-[10px] text-text-muted flex items-center justify-between">
-                <span>Audio Element #{idx + 1}</span>
-                <span className="text-emerald-400 font-medium flex items-center gap-1">
-                  <CheckCircle2 className="h-2.5 w-2.5" />
-                  Audible
-                </span>
+                <span>Audio #{idx + 1}</span>
+                {renderEvidenceBadge(item.evidenceStatus)}
               </div>
             </div>
           ))}
@@ -740,7 +804,7 @@ export const EditingBreakdown: React.FC<EditingBreakdownProps> = ({
                 </span>
               </h3>
               <p className="text-[11px] text-text-muted">
-                Chronological record of every cut, transition, graphic overlay, and audio event from start to finish
+                Chronological summary of observable cuts, transitions, text appearances, and audio events
               </p>
             </div>
           </div>
@@ -784,7 +848,7 @@ export const EditingBreakdown: React.FC<EditingBreakdownProps> = ({
             type="text"
             value={timelineSearch}
             onChange={(e) => setTimelineSearch(e.target.value)}
-            placeholder="Search editing actions or observable results (e.g., 'punch-in', 'split-screen', 'lower third', 'silence')..."
+            placeholder="Search editing actions or observable results (e.g., 'punch-in', 'split-screen', 'lower third', 'pause')..."
             className="w-full pl-9 pr-4 py-2 text-xs rounded-lg bg-background-elevated border border-card-border text-text-primary placeholder:text-text-muted focus:outline-none focus:border-primary transition-colors"
           />
         </div>

@@ -2,6 +2,7 @@ import {
   ContentAnalysisResult,
   AnalysisHistoryItem,
   ScriptTableRow,
+  EditingTimelineEvent,
 } from "../types/analysis";
 import {
   DEMO_ANALYSIS_RESULT,
@@ -222,6 +223,39 @@ class ContentAnalysisService {
       md += `| ${row.timestamp} | ${vo} | ${text} | ${visual} |\n`;
     });
     return md;
+  }
+
+  public formatEditingTimelineAsMarkdown(timeline: EditingTimelineEvent[]): string {
+    let md = "| Time | Editing Action | Observable Result |\n";
+    md += "|---|---|---|\n";
+    timeline.forEach((row) => {
+      const action = row.editingAction.replace(/\|/g, "\\|");
+      const result = row.observableResult.replace(/\|/g, "\\|");
+      md += `| ${row.timestamp} | ${action} | ${result} |\n`;
+    });
+    return md;
+  }
+
+  public exportEditingTimelineToCSV(timeline: EditingTimelineEvent[], videoTitle: string): void {
+    const headers = ["Time", "Editing Action", "Observable Result"];
+    const rows = timeline.map((row) => [
+      `"${row.timestamp}"`,
+      `"${row.editingAction.replace(/"/g, '""')}"`,
+      `"${row.observableResult.replace(/"/g, '""')}"`,
+    ]);
+
+    const csvContent =
+      "data:text/csv;charset=utf-8," +
+      [headers.join(","), ...rows.map((r) => r.join(","))].join("\n");
+
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement("a");
+    link.setAttribute("href", encodedUri);
+    const sanitizedTitle = videoTitle.toLowerCase().replace(/[^a-z0-9]/g, "_");
+    link.setAttribute("download", `${sanitizedTitle}_editing_timeline.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   }
 }
 

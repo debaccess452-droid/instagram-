@@ -119,6 +119,42 @@ export interface ScriptTableRow {
   uncertaintyNotes?: string;
 }
 
+export interface EditingTimelineEvent {
+  timestamp: string;
+  seconds: number;
+  editingAction: string;
+  observableResult: string;
+}
+
+export interface CutTransitionItem {
+  timestamp: string;
+  seconds: number;
+  transitionType: string;
+  description: string;
+}
+
+export interface TextGraphicEditingItem {
+  timestamp: string;
+  seconds: number;
+  exactExtractedText?: string;
+  presentationType: "Kinetic Word Pop" | "Title Banner" | "Lower Third" | "Call to Action" | "Split Screen Label" | "Static Overlay";
+  description: string;
+}
+
+export interface VisualEffectItem {
+  timestamp?: string;
+  seconds?: number;
+  technique: string;
+  observableDetails: string;
+}
+
+export interface AudioEditingItem {
+  timestamp?: string;
+  seconds?: number;
+  audioElement: "Voiceover Edit" | "Music Bed Ducking" | "Sound Effect Sync" | "Pacing / Breath Removal" | "Volume Accent";
+  observableDetails: string;
+}
+
 export interface EditingTechnicalDetails {
   durationSeconds: number;
   formattedDuration: string;
@@ -151,6 +187,7 @@ export interface StorytellingArcStage {
 }
 
 export interface EditingBreakdownData {
+  // Observable technical and pacing parameters
   technical: EditingTechnicalDetails;
   pacing: EditingSceneBreakdown;
   audioEditing: {
@@ -158,14 +195,31 @@ export interface EditingBreakdownData {
     musicSyncScore: string;
     soundEffectFrequency: string;
     audioTransitionsDescription: string;
+    audioItems?: AudioEditingItem[];
   };
   visualEditing: {
     textAnimationsCount: number;
     zoomsAndPansCount: number;
     colorGradingNotes: string;
     vfxList: string[];
+    vfxItems?: VisualEffectItem[];
+    textGraphicItems?: TextGraphicEditingItem[];
   };
-  storytellingArc: StorytellingArcStage[];
+  storytellingArc?: StorytellingArcStage[];
+
+  // Step 5 specific structured observable components
+  cutsAndTransitions?: CutTransitionItem[];
+  pacingAndRhythmDetails?: {
+    rhythmDescription: string;
+    averageShotDurationSeconds: number;
+    rapidCutSequences: string;
+    uninterruptedShots: string;
+    speechRelation: string;
+  };
+  textAndGraphics?: TextGraphicEditingItem[];
+  visualEffectsAndLayering?: VisualEffectItem[];
+  audioSyncBreakdown?: AudioEditingItem[];
+  editingTimeline?: EditingTimelineEvent[];
 }
 
 export interface AccuracyDimension {

@@ -325,7 +325,9 @@ export const ContentAnalysisPage: React.FC = () => {
             {activeTab === "editing" && (
               <EditingBreakdown
                 data={currentAnalysis.editingBreakdown}
+                videoTitle={currentAnalysis.videoTitle}
                 onSeek={handleSeekVideo}
+                isDemoData={Boolean(currentAnalysis.isDemoData)}
               />
             )}
 

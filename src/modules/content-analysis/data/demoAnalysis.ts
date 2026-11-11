@@ -673,9 +673,10 @@ export const DEMO_ANALYSIS_RESULT: ContentAnalysisResult = {
         { timestamp: "00:25.2", seconds: 25.2 }
       ],
       transitionTypes: [
-        { type: "Hard Jump Cut", count: 4 },
+        { type: "Hard Cut / Jump Cut", count: 4 },
         { type: "Digital Punch-In (Scale Snap)", count: 2 },
-        { type: "Whip Pan / Motion Swipe", count: 1 }
+        { type: "Split-Screen Cut", count: 1 },
+        { type: "Whip Swipe Transition", count: 1 }
       ],
       jumpCutCount: 5,
       speedRampingCount: 2,
@@ -683,73 +684,271 @@ export const DEMO_ANALYSIS_RESULT: ContentAnalysisResult = {
       beatSynchronization: "tight"
     },
     audioEditing: {
-      voTimingScore: "98% (No speech overlap, tight 0.15s silences removed)",
-      musicSyncScore: "94% (Trap beat snare hits aligned with video cuts at 00:03, 00:07, 00:15)",
-      soundEffectFrequency: "One SFX every 2.4 seconds on average",
+      voTimingScore: "Tight vocal continuity (micro-silences <0.15s removed)",
+      musicSyncScore: "Beat alignment with video cuts at 00:03.9, 00:07.4, 00:21.0",
+      soundEffectFrequency: "One synchronized SFX every 3.5 seconds on average",
       audioTransitionsDescription:
-        "Sub-bass drops anchor structural topic shifts; whoosh risers anticipate visual jump cuts."
+        "Low-frequency sub drops mark structural shifts; whoosh risers anticipate visual transitions."
     },
     visualEditing: {
-      textAnimationsCount: 9,
-      zoomsAndPansCount: 4,
+      textAnimationsCount: 8,
+      zoomsAndPansCount: 3,
       colorGradingNotes:
-        "Custom high-contrast teal-and-slate LUT with boosted magenta/violet channel to enhance skin tone luminescence against dark backgrounds.",
+        "High-contrast color grading with deep shadow rolloff, warm amber skin tones, and subtle violet accent lighting in the background.",
       vfxList: [
         "Kinetic Word Bounce",
-        "Screen Recording Drop Shadow & Rounded Corners",
+        "Screen Recording Rounded Corners & Shadow",
+        "Split-Screen 50/50 Dual Layout",
         "Floating Glassmorphism Card Overlay",
-        "Light Leak Shimmer at 00:15.6",
-        "Pulsing CTA Beacon Badge"
+        "Pulsing Call-to-Action Banner"
       ]
     },
-    storytellingArc: [
+
+    // Step 5: Six Observable Components
+    cutsAndTransitions: [
       {
-        stage: "Hook",
-        timestamp: "00:00–00:03.9",
-        secondsStart: 0,
-        secondsEnd: 3.9,
-        description: "Negative-bias assertion ('Stop posting daily') disrupts common creator dogma.",
-        engagementIntent: "Halts scroll velocity within first 400ms by challenging standard advice"
+        timestamp: "00:01.8",
+        seconds: 1.8,
+        transitionType: "Digital Punch-In (Scale Snap)",
+        description: "Instant 1.25x scale punch-in from medium shot to close-up on subject's face for rhetorical emphasis."
       },
       {
-        stage: "Opening",
+        timestamp: "00:03.9",
+        seconds: 3.9,
+        transitionType: "Hard Cut",
+        description: "Hard cut changing angle back to medium desk framing as subject holds up physical notebook."
+      },
+      {
+        timestamp: "00:07.4",
+        seconds: 7.4,
+        transitionType: "Picture-in-Picture Transition",
+        description: "Cut to full-bleed desktop screen recording; camera framing scales subject into circular lower-left PIP frame."
+      },
+      {
+        timestamp: "00:11.2",
+        seconds: 11.2,
+        transitionType: "Digital Scale Snap",
+        description: "1.15x digital crop onto the interface hook matrix column, focusing visual attention on template cards."
+      },
+      {
+        timestamp: "00:15.6",
+        seconds: 15.6,
+        transitionType: "Hard Cut",
+        description: "Hard cut switching back from software demonstration to primary A-roll talking head shot."
+      },
+      {
+        timestamp: "00:21.0",
+        seconds: 21.0,
+        transitionType: "Split-Screen Transition",
+        description: "Vertical 50/50 dual pane cut; subject on left reacts while software interface generates output on right."
+      },
+      {
+        timestamp: "00:25.2",
+        seconds: 25.2,
+        transitionType: "Whip Swipe Transition",
+        description: "Rapid horizontal motion swipe cut transitioning into wider concluding framing for call-to-action."
+      }
+    ],
+
+    pacingAndRhythmDetails: {
+      rhythmDescription: "Fast-paced, high-retention editing cadence. Cuts occur at an average interval of 2.1 seconds, creating continuous visual re-engagement without disorienting the viewer.",
+      averageShotDurationSeconds: 2.1,
+      rapidCutSequences: "Opening hook (00:00–00:03.9) features 3 rapid visual transitions in 3.9 seconds (~1.3s per cut) designed to stop vertical feed scroll velocity.",
+      uninterruptedShots: "Tactical demonstration (00:07.4–00:15.6) maintains longer screen demonstration (3.8s and 4.4s shots) to allow viewers to absorb interface workflow.",
+      speechRelation: "Every cut coincides exactly with spoken thought conclusions and punchlines. Breath intakes and vocal pauses are eliminated through micro-edits, ensuring relentless pacing."
+    },
+
+    textAndGraphics: [
+      {
+        timestamp: "00:00–00:01.8",
+        seconds: 0.0,
+        exactExtractedText: "STOP POSTING DAILY 🛑",
+        presentationType: "Kinetic Word Pop",
+        description: "High-contrast white and red sans-serif banner with animated scale pop bounce at top-center."
+      },
+      {
+        timestamp: "00:01.8–00:03.9",
+        seconds: 1.8,
+        exactExtractedText: "it's frying your brain and killing retention.",
+        presentationType: "Kinetic Word Pop",
+        description: "Rapid kinetic typography timed word-by-word with speech cadence across center frame."
+      },
+      {
         timestamp: "00:03.9–00:07.4",
-        secondsStart: 3.9,
-        secondsEnd: 7.4,
-        description: "Introduces the proprietary vehicle ('Creator DNA 3-Step System').",
-        engagementIntent: "Positions creator as high-status domain expert (top 1% authority)"
+        seconds: 3.9,
+        exactExtractedText: "The 3-Step Creator DNA Method",
+        presentationType: "Title Banner",
+        description: "Top-edge slide-down title card in high-contrast neon violet pill container."
       },
       {
-        stage: "Main Content",
-        timestamp: "00:07.4–00:15.6",
-        secondsStart: 7.4,
-        secondsEnd: 15.6,
-        description: "Breaks down steps 1 and 2 (batching hook archetypes & visual consistency anchor).",
-        engagementIntent: "Delivers immediate tactical utility that solves the pain point"
+        timestamp: "00:07.4–00:11.2",
+        seconds: 7.4,
+        exactExtractedText: "STEP 1: Batch Hook Archetypes 🎣",
+        presentationType: "Lower Third",
+        description: "Animated lower-third badge with dark backdrop and hook icon highlighting step 1."
       },
       {
-        stage: "Development",
-        timestamp: "00:15.6–00:21.0",
-        secondsStart: 15.6,
-        secondsEnd: 21.0,
-        description: "Addresses the AI controversy: replicate voice without sacrificing original thinking.",
-        engagementIntent: "Creates philosophical alignment and overcomes viewer skepticism"
+        timestamp: "00:11.2–00:15.6",
+        seconds: 11.2,
+        exactExtractedText: "STEP 2: Lock 1 Visual Anchor 🎥",
+        presentationType: "Lower Third",
+        description: "Sequential lower-third badge replacement with camera icon highlighting step 2."
       },
       {
-        stage: "Payoff",
-        timestamp: "00:21.0–00:25.2",
-        secondsStart: 21.0,
-        secondsEnd: 25.2,
-        description: "Visual proof of 10 variations created in 4 seconds.",
-        engagementIntent: "Delivers dopamine rush through tangible proof of effortless leverage"
+        timestamp: "00:15.6–00:18.2",
+        seconds: 15.6,
+        exactExtractedText: "STEP 3: Replicate Voice",
+        presentationType: "Lower Third",
+        description: "Lower-third badge displaying final step in workflow progression."
       },
       {
-        stage: "Call-to-Action",
+        timestamp: "00:21.0–00:23.5",
+        seconds: 21.0,
+        exactExtractedText: "⚡ 10 Variations in 4 Seconds",
+        presentationType: "Split Screen Label",
+        description: "High-energy top-center headline banner with pulsing highlight effect."
+      },
+      {
         timestamp: "00:25.2–00:28.5",
-        secondsStart: 25.2,
-        secondsEnd: 28.5,
-        description: "Low-friction direct save action and profile bio template prompt.",
-        engagementIntent: "Maximizes algorithmic save signals which drive Explore page distribution"
+        seconds: 25.2,
+        exactExtractedText: "SAVE THIS REEL 📌 link in bio for template",
+        presentationType: "Call to Action",
+        description: "Prominent bottom-center card with bookmark pin icon and high-contrast call to action."
+      }
+    ],
+
+    visualEffectsAndLayering: [
+      {
+        technique: "Color Grading & Lighting Contrast",
+        observableDetails: "High-contrast color grading with deep shadow rolloff and warm amber skin tones. Background wall accent lighting shifts visibly from slate to violet at 00:03.9."
+      },
+      {
+        timestamp: "00:07.4–00:11.2",
+        seconds: 7.4,
+        technique: "Picture-in-Picture Multi-Layer Layout",
+        observableDetails: "Composites recorded software screen with rounded corners and drop shadow behind a circular subject cutout positioned in the lower-left corner."
+      },
+      {
+        timestamp: "00:21.0–00:25.2",
+        seconds: 21.0,
+        technique: "Vertical Split-Screen Composition",
+        observableDetails: "Vertical 50/50 dual pane split cleanly separates live human reaction on the left from automated software generation on the right with a 2px divider line."
+      },
+      {
+        timestamp: "00:04.5",
+        seconds: 4.5,
+        technique: "Motion Graphic Overlays",
+        observableDetails: "Semi-transparent glassmorphism card overlays and animated DNA double-helix line graphic floating beside subject."
+      },
+      {
+        timestamp: "00:01.8",
+        seconds: 1.8,
+        technique: "Digital Punch-In & Crop",
+        observableDetails: "Instant 1.25x digital scale punch-in without optical lens zoom executed at 00:01.8 and 00:11.2 to increase rhetorical emphasis."
+      }
+    ],
+
+    audioSyncBreakdown: [
+      {
+        audioElement: "Voiceover Edit",
+        observableDetails: "Relentless vocal continuity with silences under 0.15s removed. Speech hesitations, pauses, and breath sounds are fully cut out."
+      },
+      {
+        audioElement: "Music Bed Ducking",
+        observableDetails: "Subdued trap beat ducks by approximately 6–8 dB beneath the voiceover during dialogue, then swells during cut transitions at 00:03.9 and 00:21.0."
+      },
+      {
+        timestamp: "00:00.8",
+        seconds: 0.8,
+        audioElement: "Sound Effect Sync",
+        observableDetails: "Subdued whoosh riser anticipation accompanying the 'STOP POSTING DAILY 🛑' text pop-in."
+      },
+      {
+        timestamp: "00:03.2",
+        seconds: 3.2,
+        audioElement: "Sound Effect Sync",
+        observableDetails: "Subtle impact click synchronized with 'killing retention.' kinetic text flash."
+      },
+      {
+        timestamp: "00:07.1",
+        seconds: 7.1,
+        audioElement: "Sound Effect Sync",
+        observableDetails: "Low sub-bass drop marking transition into screen demonstration."
+      },
+      {
+        timestamp: "00:11.4",
+        seconds: 11.4,
+        audioElement: "Sound Effect Sync",
+        observableDetails: "Paper slide sound effect aligned with Step 2 lower-third appearance."
+      },
+      {
+        timestamp: "00:20.5",
+        seconds: 20.5,
+        audioElement: "Sound Effect Sync",
+        observableDetails: "High-frequency digital chime / ping marking the variation counter reveal."
+      },
+      {
+        timestamp: "00:25.0",
+        seconds: 25.0,
+        audioElement: "Pacing / Breath Removal",
+        observableDetails: "Brief 0.2s intentional audio ducking / micro-silence preceding the call to action, creating auditory punctuation."
+      }
+    ],
+
+    editingTimeline: [
+      {
+        timestamp: "00:00.0–00:01.8",
+        seconds: 0.0,
+        editingAction: "Opening Hard Cut & Text Pop-In",
+        observableResult: "Medium close-up appears; red/white 'STOP POSTING DAILY 🛑' text bounces into top-center; trap beat intro with subdued whoosh riser."
+      },
+      {
+        timestamp: "00:01.8–00:03.9",
+        seconds: 1.8,
+        editingAction: "Digital Punch-In & Kinetic Typography",
+        observableResult: "Instant 1.25x scale punch-in to close-up; kinetic text 'it's frying your brain' and 'and killing retention.' flashes word-by-word; subtle impact click sound."
+      },
+      {
+        timestamp: "00:03.9–00:07.4",
+        seconds: 3.9,
+        editingAction: "Hard Cut & Top Title Slide",
+        observableResult: "Cut to desk medium framing; violet 'The 3-Step Creator DNA Method' banner slides down from top; floating DNA line graphic animates."
+      },
+      {
+        timestamp: "00:07.4–00:11.2",
+        seconds: 7.4,
+        editingAction: "PiP Screen Recording Transition & Lower Third",
+        observableResult: "Subject scales into lower-left circular PiP; full-frame screen recording appears; 'STEP 1: Batch Hook Archetypes 🎣' lower third slides in with bass sub drop."
+      },
+      {
+        timestamp: "00:11.2–00:15.6",
+        seconds: 11.2,
+        editingAction: "Digital Scale Snap & Step 2 Graphic",
+        observableResult: "Screen recording zooms 1.15x onto workflow canvas; lower-third transitions to 'STEP 2: Lock 1 Visual Anchor 🎥' with paper slide sound effect."
+      },
+      {
+        timestamp: "00:15.6–00:21.0",
+        seconds: 15.6,
+        editingAction: "Hard Cut back to A-Roll & Accent Shift",
+        observableResult: "Cut back to primary subject talking head; lower third updates to 'STEP 3: Replicate Voice'; background violet accent lighting becomes visible."
+      },
+      {
+        timestamp: "00:21.0–00:25.0",
+        seconds: 21.0,
+        editingAction: "Split-Screen Composite & Kinetic Counter",
+        observableResult: "Vertical 50/50 dual pane cut; '⚡ 10 Variations in 4 Seconds' banner pulses at top; digital chime sound effect plays as dashboard results scroll."
+      },
+      {
+        timestamp: "00:25.0–00:25.2",
+        seconds: 25.0,
+        editingAction: "Intentional Audio Beat Drop / Micro-Silence",
+        observableResult: "Music rhythm cuts out for 0.2s; creates auditory punctuation before concluding statement."
+      },
+      {
+        timestamp: "00:25.2–00:28.5",
+        seconds: 25.2,
+        editingAction: "Whip Swipe Transition & CTA Overlay",
+        observableResult: "Motion swipe cut to wide medium shot; 'SAVE THIS REEL 📌 link in bio for template' pill badge appears at bottom-center; music bed fades gently to close."
       }
     ]
   },

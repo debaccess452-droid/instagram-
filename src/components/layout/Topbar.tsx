@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { Link, NavLink } from "react-router-dom";
-import { Sparkles, Bell, User, Menu, X } from "lucide-react";
+import { Sparkles, Bell, User, Menu, X, LogOut } from "lucide-react";
 import { Button } from "@/components/buttons";
 import { Logo } from "@/components/common";
 import { ROUTES } from "@/constants/routes";
@@ -9,8 +9,19 @@ import { SIDEBAR_ITEMS } from "@/components/navigation/Sidebar";
 import { cn } from "@/utils/cn";
 
 export const Topbar: React.FC = () => {
-  const { user } = useAuth();
+  const { user, logout } = useAuth();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [loggingOut, setLoggingOut] = useState(false);
+
+  const handleLogout = async () => {
+    try {
+      setLoggingOut(true);
+      await logout();
+    } catch (err) {
+      console.error("Logout error:", err);
+      setLoggingOut(false);
+    }
+  };
 
   return (
     <>
@@ -57,8 +68,19 @@ export const Topbar: React.FC = () => {
             className="flex items-center gap-2.5 rounded-md border border-card-border bg-card px-3 py-1.5 text-sm font-medium text-text-primary hover:border-primary/40"
           >
             <User className="h-4 w-4 text-primary" />
-            <span className="hidden sm:inline">{user?.name || "Alex Rivera"}</span>
+            <span className="hidden sm:inline">{user?.name || user?.email || "Creator"}</span>
           </Link>
+
+          <button
+            type="button"
+            onClick={handleLogout}
+            disabled={loggingOut}
+            aria-label="Sign out"
+            title="Sign out of your account"
+            className="rounded-sm p-2 text-text-secondary hover:bg-error/10 hover:text-error transition-colors"
+          >
+            <LogOut className="h-5 w-5" />
+          </button>
         </div>
       </header>
 
@@ -101,6 +123,20 @@ export const Topbar: React.FC = () => {
                   </NavLink>
                 );
               })}
+
+              <div className="pt-2 border-t border-card-border/50">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMobileMenuOpen(false);
+                    handleLogout();
+                  }}
+                  className="flex items-center gap-3 w-full rounded-md px-3.5 py-2.5 text-sm font-medium text-error hover:bg-error/10 transition-colors"
+                >
+                  <LogOut className="h-4 w-4" />
+                  <span>Sign Out</span>
+                </button>
+              </div>
             </nav>
 
             <div className="pt-3 border-t border-card-border">

@@ -18,30 +18,75 @@ import { ROUTES } from "@/constants/routes";
 export const Login: React.FC = () => {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [rememberMe, setRememberMe] = useState(true);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState(false);
   const [loading, setLoading] = useState(false);
-  const { login } = useAuth();
+  const [socialLoading, setSocialLoading] = useState(false);
+
+  const { signIn, signInWithGoogle } = useAuth();
   const navigate = useNavigate();
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
-    if (!email.includes("@")) {
+
+    if (!email.trim()) {
+      setError("Please enter your email address.");
+      return;
+    }
+
+    if (!email.includes("@") || !email.includes(".")) {
       setError("Please enter a valid email address.");
       return;
     }
-    if (password.length < 6) {
-      setError("Password must be at least 6 characters.");
+
+    if (!password) {
+      setError("Please enter your password.");
       return;
     }
+
     setLoading(true);
-    setTimeout(() => {
-      setLoading(false);
+
+    try {
+      const { error: authError } = await signIn(email, password);
+
+      if (authError) {
+        if (authError.message.toLowerCase().includes("invalid login credentials")) {
+          setError("Invalid email or password. Please check your credentials and try again.");
+        } else if (authError.message.toLowerCase().includes("email not confirmed")) {
+          setError(
+            "Your email address has not been verified. Please check your inbox for the verification link."
+          );
+        } else {
+          setError(authError.message || "Failed to sign in. Please try again.");
+        }
+        setLoading(false);
+        return;
+      }
+
       setSuccess(true);
-      login(email);
-      setTimeout(() => navigate(ROUTES.DASHBOARD), 500);
-    }, 600);
+      setLoading(false);
+      navigate(ROUTES.DASHBOARD);
+    } catch (err: any) {
+      setError(err?.message || "An unexpected error occurred during sign in.");
+      setLoading(false);
+    }
+  };
+
+  const handleGoogleSignIn = async () => {
+    setError("");
+    setSocialLoading(true);
+    try {
+      const { error: authError } = await signInWithGoogle();
+      if (authError) {
+        setError(authError.message || "Failed to initiate Google sign in.");
+        setSocialLoading(false);
+      }
+    } catch (err: any) {
+      setError(err?.message || "An unexpected error occurred.");
+      setSocialLoading(false);
+    }
   };
 
   return (
@@ -56,7 +101,7 @@ export const Login: React.FC = () => {
         {success && (
           <FormMessage
             type="success"
-            message="Signed in! Redirecting to your workspace..."
+            message="Signed in successfully! Redirecting to workspace..."
           />
         )}
 
@@ -66,6 +111,7 @@ export const Login: React.FC = () => {
           placeholder="you@creator.com"
           value={email}
           onChange={(e) => setEmail(e.target.value)}
+          disabled={loading}
           required
         />
 
@@ -74,20 +120,30 @@ export const Login: React.FC = () => {
           placeholder="••••••••"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
+          disabled={loading}
           required
         />
 
         <div className="flex items-center justify-between text-xs">
-          <Checkbox label="Remember me for 30 days" />
+          <Checkbox
+            label="Remember me for 30 days"
+            checked={rememberMe}
+            onChange={(e) => setRememberMe(e.target.checked)}
+          />
           <Link
             to={ROUTES.FORGOT_PASSWORD}
-            className="font-medium text-[#7C3AED] hover:text-[#A855F7]"
+            className="font-medium text-[#7C3AED] hover:text-[#A855F7] transition-colors"
           >
             Forgot password?
           </Link>
         </div>
 
-        <LoadingButton type="submit" isLoading={loading} loadingText="Signing in...">
+        <LoadingButton
+          type="submit"
+          isLoading={loading}
+          loadingText="Signing in..."
+          disabled={socialLoading}
+        >
           Sign In
         </LoadingButton>
       </form>
@@ -95,10 +151,8 @@ export const Login: React.FC = () => {
       <Divider />
       <SocialButton
         provider="Google"
-        onClick={() => {
-          login("alex@virulmuse.ai");
-          navigate(ROUTES.DASHBOARD);
-        }}
+        onClick={handleGoogleSignIn}
+        disabled={loading || socialLoading}
       />
 
       <AuthFooter

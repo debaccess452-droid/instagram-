@@ -9,11 +9,13 @@ export const VerifyEmail: React.FC = () => {
       <StatusIcon variant="email" />
       <AuthHeader
         title="Check your email"
-        subtitle="We sent a verification link to your email address."
+        subtitle="We sent a verification link to your email address. Please click the link to confirm and activate your account."
       />
-      <Link to={ROUTES.ONBOARDING_WELCOME}>
-        <LoadingButton type="button">Continue to Onboarding</LoadingButton>
-      </Link>
+      <div className="space-y-3 pt-2">
+        <Link to={ROUTES.LOGIN} className="block">
+          <LoadingButton type="button">Back to Sign In</LoadingButton>
+        </Link>
+      </div>
     </AuthCard>
   );
 };

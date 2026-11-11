@@ -308,6 +308,7 @@ export const ContentAnalysisPage: React.FC = () => {
               <TextExtraction
                 data={currentAnalysis.textExtraction}
                 onSeek={handleSeekVideo}
+                isDemoData={Boolean(currentAnalysis.isDemoData)}
               />
             )}
 

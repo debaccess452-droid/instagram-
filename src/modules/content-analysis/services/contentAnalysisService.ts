@@ -1,16 +1,19 @@
 import {
   ContentAnalysisResult,
   AnalysisHistoryItem,
+  ContentAnalysisRecord,
   ScriptTableRow,
   EditingTimelineEvent,
 } from "../types/analysis";
 import {
   DEMO_ANALYSIS_RESULT,
   DEMO_PRESET_REELS,
-  INITIAL_ANALYSIS_HISTORY,
 } from "../data/demoAnalysis";
+import { supabase } from "@/lib/supabase";
 
-const STORAGE_KEY_HISTORY = "virulmuse_analysis_history";
+export const STORAGE_BUCKET = "reel-uploads";
+export const TABLE_CONTENT_ANALYSES = "content_analyses";
+
 const STORAGE_KEY_CURRENT = "virulmuse_current_analysis";
 
 export const PROCESSING_STAGES = [
@@ -24,42 +27,307 @@ export const PROCESSING_STAGES = [
   { id: 8, label: "Preparing evidence-backed accuracy report", detail: "Isolating direct evidence from analytical inferences" },
 ];
 
+export const ALLOWED_VIDEO_MIME_TYPES = [
+  "video/mp4",
+  "video/quicktime",
+  "video/webm",
+];
+
+export const ALLOWED_VIDEO_EXTENSIONS = ["mp4", "mov", "webm"];
+export const MAX_VIDEO_FILE_SIZE_BYTES = 100 * 1024 * 1024; // 100 MB limit
+
 class ContentAnalysisService {
-  private history: AnalysisHistoryItem[] = [];
+  /**
+   * Uploads an Instagram Reel video to private Supabase Storage ("reel-uploads")
+   * and creates a record in `public.content_analyses` associated with the authenticated user.
+   */
+  public async uploadReel(
+    file: File,
+    durationSeconds?: number
+  ): Promise<{ record: ContentAnalysisRecord }> {
+    // 1. Authenticate user from Supabase session
+    const {
+      data: { session },
+      error: sessionError,
+    } = await supabase.auth.getSession();
 
-  constructor() {
-    this.initHistory();
-  }
+    if (sessionError || !session?.user) {
+      throw new Error(
+        "Authentication required: You must be signed in to upload Reels. Please log in to your account."
+      );
+    }
 
-  private initHistory(): void {
-    try {
-      const stored = localStorage.getItem(STORAGE_KEY_HISTORY);
-      if (stored) {
-        this.history = JSON.parse(stored);
+    const userId = session.user.id;
+
+    // 2. Validate file type and extension
+    const ext = file.name.split(".").pop()?.toLowerCase() || "";
+    const isExtensionValid = ALLOWED_VIDEO_EXTENSIONS.includes(ext);
+    const isMimeValid = !file.type || ALLOWED_VIDEO_MIME_TYPES.includes(file.type);
+
+    if (!isExtensionValid || (!isMimeValid && file.type)) {
+      throw new Error(
+        `Unsupported video format. Only MP4, MOV, and WEBM video files are supported. Received "${file.type || ext}".`
+      );
+    }
+
+    // 3. Validate maximum file size (100 MB)
+    if (file.size > MAX_VIDEO_FILE_SIZE_BYTES) {
+      const sizeMb = (file.size / (1024 * 1024)).toFixed(1);
+      throw new Error(
+        `File size (${sizeMb} MB) exceeds maximum allowed size of 100 MB.`
+      );
+    }
+
+    // Determine normalized MIME type
+    let mimeType = file.type;
+    if (!mimeType || !ALLOWED_VIDEO_MIME_TYPES.includes(mimeType)) {
+      if (ext === "mov") {
+        mimeType = "video/quicktime";
+      } else if (ext === "webm") {
+        mimeType = "video/webm";
       } else {
-        this.history = [...INITIAL_ANALYSIS_HISTORY];
-        this.saveHistory();
+        mimeType = "video/mp4";
       }
-    } catch {
-      this.history = [...INITIAL_ANALYSIS_HISTORY];
     }
-  }
 
-  private saveHistory(): void {
+    // 4. Generate unique file name to prevent accidental overwrites
+    const timestamp = Date.now();
+    const uniqueSuffix =
+      typeof crypto !== "undefined" && crypto.randomUUID
+        ? crypto.randomUUID().slice(0, 8)
+        : Math.random().toString(36).substring(2, 10);
+    const sanitizedBaseName =
+      file.name
+        .replace(/\.[^/.]+$/, "")
+        .replace(/[^a-zA-Z0-9_-]/g, "_")
+        .substring(0, 40) || "reel";
+    const uniqueFileName = `${timestamp}_${uniqueSuffix}_${sanitizedBaseName}.${ext}`;
+
+    // 5. Build storage folder path: {authenticated-user-id}/{unique-file-name}
+    const filePath = `${userId}/${uniqueFileName}`;
+
+    // 6. Upload file to private storage bucket
+    let uploadData;
     try {
-      localStorage.setItem(STORAGE_KEY_HISTORY, JSON.stringify(this.history));
-    } catch {
-      // In-memory fallback
+      const uploadRes = await supabase.storage
+        .from(STORAGE_BUCKET)
+        .upload(filePath, file, {
+          contentType: mimeType,
+          upsert: false,
+          cacheControl: "3600",
+        });
+
+      if (uploadRes.error) {
+        throw new Error(
+          `Storage upload failed: ${uploadRes.error.message || "Failed to upload file to storage."}`
+        );
+      }
+      uploadData = uploadRes.data;
+    } catch (uploadErr: any) {
+      if (uploadErr.message?.includes("Failed to fetch") || uploadErr.name === "TypeError") {
+        throw new Error(
+          "Network connection failed during file upload. Please check your internet connection and try again."
+        );
+      }
+      throw uploadErr;
+    }
+
+    // 7. Insert record into public.content_analyses table
+    const safeDuration =
+      typeof durationSeconds === "number" &&
+      !isNaN(durationSeconds) &&
+      durationSeconds > 0
+        ? Math.round(durationSeconds * 10) / 10
+        : null;
+
+    const { data: record, error: insertError } = await supabase
+      .from(TABLE_CONTENT_ANALYSES)
+      .insert({
+        user_id: userId,
+        file_path: filePath,
+        file_name: file.name,
+        mime_type: mimeType,
+        file_size_bytes: file.size,
+        duration_seconds: safeDuration,
+        status: "uploaded",
+      })
+      .select()
+      .single();
+
+    // 8. Error handling & rollback cleanup if database insert fails
+    if (insertError || !record) {
+      let cleanupFailed = false;
+      let cleanupDetail = "";
+      try {
+        const { error: removeError } = await supabase.storage
+          .from(STORAGE_BUCKET)
+          .remove([filePath]);
+        if (removeError) {
+          cleanupFailed = true;
+          cleanupDetail = ` (Cleanup notice: unable to delete orphaned storage file: ${removeError.message})`;
+        } else {
+          cleanupDetail = " (Orphaned storage file was removed successfully)";
+        }
+      } catch (cleanupEx: any) {
+        cleanupFailed = true;
+        cleanupDetail = ` (Cleanup notice: storage cleanup failed: ${cleanupEx?.message || cleanupEx})`;
+      }
+
+      const originalError = insertError?.message || "Failed to create database record.";
+      throw new Error(
+        `Database record creation failed: ${originalError}${cleanupDetail}`
+      );
+    }
+
+    return { record: record as ContentAnalysisRecord };
+  }
+
+  /**
+   * Fetches real records from public.content_analyses for the authenticated user,
+   * ordered newest first.
+   */
+  public async fetchUserAnalyses(): Promise<ContentAnalysisRecord[]> {
+    try {
+      const {
+        data: { session },
+        error: sessionError,
+      } = await supabase.auth.getSession();
+
+      if (sessionError || !session?.user) {
+        return [];
+      }
+
+      const { data, error } = await supabase
+        .from(TABLE_CONTENT_ANALYSES)
+        .select("*")
+        .eq("user_id", session.user.id)
+        .order("created_at", { ascending: false });
+
+      if (error) {
+        console.error(
+          "[ContentAnalysisService] Error fetching user content analyses:",
+          error
+        );
+        return [];
+      }
+
+      return (data as ContentAnalysisRecord[]) || [];
+    } catch (err) {
+      console.error(
+        "[ContentAnalysisService] Exception fetching user content analyses:",
+        err
+      );
+      return [];
     }
   }
 
-  public getHistory(): AnalysisHistoryItem[] {
-    return [...this.history];
+  /**
+   * Deletes a record from public.content_analyses and removes the file from private Storage.
+   */
+  public async deleteUserAnalysis(
+    id: string,
+    filePath?: string
+  ): Promise<{ error: Error | null }> {
+    try {
+      const {
+        data: { session },
+        error: sessionError,
+      } = await supabase.auth.getSession();
+
+      if (sessionError || !session?.user) {
+        throw new Error("You must be logged in to delete an analysis.");
+      }
+
+      // 1. Delete database record
+      const { error: dbError } = await supabase
+        .from(TABLE_CONTENT_ANALYSES)
+        .delete()
+        .eq("id", id)
+        .eq("user_id", session.user.id);
+
+      if (dbError) {
+        throw new Error(`Failed to delete database record: ${dbError.message}`);
+      }
+
+      // 2. If storage filePath is available, delete from private bucket
+      if (filePath) {
+        try {
+          await supabase.storage.from(STORAGE_BUCKET).remove([filePath]);
+        } catch (storageErr) {
+          console.warn(
+            "[ContentAnalysisService] Storage deletion note:",
+            storageErr
+          );
+        }
+      }
+
+      return { error: null };
+    } catch (err: any) {
+      return { error: err };
+    }
   }
 
-  public deleteHistoryItem(id: string): void {
-    this.history = this.history.filter((item) => item.id !== id);
-    this.saveHistory();
+  /**
+   * Generates a short-lived signed URL for private video playback/preview.
+   * Does NOT make the bucket public.
+   */
+  public async getSignedPlaybackUrl(
+    filePath: string,
+    expiresInSeconds: number = 3600
+  ): Promise<string | null> {
+    try {
+      const { data, error } = await supabase.storage
+        .from(STORAGE_BUCKET)
+        .createSignedUrl(filePath, expiresInSeconds);
+
+      if (error || !data?.signedUrl) {
+        return null;
+      }
+      return data.signedUrl;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Maps a ContentAnalysisRecord database row into the UI's AnalysisHistoryItem format.
+   */
+  public mapRecordToHistoryItem(record: ContentAnalysisRecord): AnalysisHistoryItem {
+    const result = record.analysis_result as ContentAnalysisResult | null;
+    const rawTitle = record.file_name.replace(/\.[^/.]+$/, "").replace(/[-_]/g, " ");
+    const formattedTitle = rawTitle.charAt(0).toUpperCase() + rawTitle.slice(1);
+    const durationFormatted = record.duration_seconds
+      ? this.formatDuration(record.duration_seconds)
+      : "--:--";
+
+    const dateObj = new Date(record.created_at);
+    const dateFormatted = !isNaN(dateObj.getTime())
+      ? dateObj.toLocaleDateString(undefined, {
+          month: "short",
+          day: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+        })
+      : "Recently";
+
+    return {
+      id: record.id,
+      videoTitle: result?.videoTitle || formattedTitle,
+      videoFileName: record.file_name,
+      thumbnailUrl:
+        result?.thumbnailUrl ||
+        "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=600&auto=format&fit=crop&q=80",
+      uploadedAt: dateFormatted,
+      durationFormatted,
+      status: record.status,
+      sceneCount: result?.visualAnalysis?.totalScenes || 0,
+      accuracyScore: result?.accuracyReport?.overallScore || 0,
+      isDemo: false,
+      filePath: record.file_path,
+      fileSizeBytes: record.file_size_bytes,
+      mimeType: record.mime_type,
+      createdAt: record.created_at,
+    };
   }
 
   public getPresetReels() {
@@ -81,31 +349,11 @@ class ContentAnalysisService {
   public saveCurrentAnalysis(analysis: ContentAnalysisResult): void {
     try {
       localStorage.setItem(STORAGE_KEY_CURRENT, JSON.stringify(analysis));
-      // Also upsert into history
-      const existsIndex = this.history.findIndex((h) => h.id === analysis.id);
-      const historyEntry: AnalysisHistoryItem = {
-        id: analysis.id,
-        videoTitle: analysis.videoTitle,
-        videoFileName: analysis.videoFileName,
-        thumbnailUrl: analysis.thumbnailUrl,
-        uploadedAt: "Just now",
-        durationFormatted: analysis.formattedDuration,
-        status: analysis.status,
-        sceneCount: analysis.visualAnalysis.totalScenes,
-        accuracyScore: analysis.accuracyReport.overallScore,
-        isDemo: Boolean(analysis.isDemoData),
-      };
-
-      if (existsIndex >= 0) {
-        this.history[existsIndex] = historyEntry;
-      } else {
-        this.history.unshift(historyEntry);
-      }
-      this.saveHistory();
     } catch {
       // Fallback
     }
   }
+
 
   /**
    * Generates a result for a custom uploaded video or preset.

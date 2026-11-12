@@ -280,6 +280,24 @@ export interface ContentAnalysisResult {
   isDemoData?: boolean;
 }
 
+/**
+ * Database record matching public.content_analyses table in Supabase.
+ */
+export interface ContentAnalysisRecord {
+  id: string; // UUID generated automatically
+  user_id: string; // Authenticated user's UUID
+  file_path: string; // Storage path: {user_id}/{unique_file_name}
+  file_name: string; // Original uploaded file name
+  mime_type: string; // video/mp4, video/quicktime, or video/webm
+  file_size_bytes: number; // File size in bytes
+  duration_seconds: number | null; // Optional video duration
+  status: "uploaded" | "processing" | "completed" | "failed"; // Defaults to 'uploaded'
+  analysis_result: ContentAnalysisResult | Record<string, unknown> | null; // Reserved for future Gemini results
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface AnalysisHistoryItem {
   id: string;
   videoTitle: string;
@@ -287,10 +305,14 @@ export interface AnalysisHistoryItem {
   thumbnailUrl: string;
   uploadedAt: string;
   durationFormatted: string;
-  status: "completed" | "processing" | "failed";
+  status: "completed" | "processing" | "failed" | "uploaded";
   sceneCount: number;
   accuracyScore: number;
   isDemo?: boolean;
+  filePath?: string;
+  fileSizeBytes?: number;
+  mimeType?: string;
+  createdAt?: string;
 }
 
 export type AnalysisTabType =
@@ -301,3 +323,4 @@ export type AnalysisTabType =
   | "script"
   | "editing"
   | "accuracy";
+

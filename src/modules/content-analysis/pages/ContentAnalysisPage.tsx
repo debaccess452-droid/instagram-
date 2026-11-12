@@ -19,8 +19,10 @@ import {
   ContentAnalysisResult,
   AnalysisTabType,
   AnalysisHistoryItem,
+  ContentAnalysisRecord,
 } from "../types/analysis";
 import { contentAnalysisService } from "../services/contentAnalysisService";
+import { useAuth } from "@/hooks/useAuth";
 import { AnalysisHeader } from "../components/AnalysisHeader";
 import { VideoUploader } from "../components/VideoUploader";
 import { VideoPreviewPlayerRef } from "../components/VideoPreviewPlayer";
@@ -37,15 +39,18 @@ import { ExportModal } from "../components/ExportModal";
 import { cn } from "@/utils/cn";
 
 export const ContentAnalysisPage: React.FC = () => {
+  const { supabaseUser } = useAuth();
+
   const [currentAnalysis, setCurrentAnalysis] = useState<ContentAnalysisResult | null>(
     null
   );
   const [activeTab, setActiveTab] = useState<AnalysisTabType>("overview");
-  const [isUploadMode, setIsUploadMode] = useState<boolean>(false);
+  const [isUploadMode, setIsUploadMode] = useState<boolean>(true);
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [historyItems, setHistoryItems] = useState<AnalysisHistoryItem[]>([]);
   const [isHistoryModalOpen, setIsHistoryModalOpen] = useState<boolean>(false);
   const [isExportModalOpen, setIsExportModalOpen] = useState<boolean>(false);
+  const [lastUploadedRecord, setLastUploadedRecord] = useState<ContentAnalysisRecord | null>(null);
 
   // Stored pending file info for processing
   const pendingJobRef = useRef<{
@@ -56,18 +61,42 @@ export const ContentAnalysisPage: React.FC = () => {
 
   const playerRef = useRef<VideoPreviewPlayerRef>(null);
 
-  // Load initial analysis and history on mount
+  // Load user records from Supabase on mount and when auth state changes
   useEffect(() => {
-    const latest = contentAnalysisService.getLatestOrDemoAnalysis();
-    setCurrentAnalysis(latest);
-    setHistoryItems(contentAnalysisService.getHistory());
-  }, []);
+    let isCurrent = true;
+
+    async function loadUserAnalyses() {
+      if (supabaseUser?.id) {
+        const records = await contentAnalysisService.fetchUserAnalyses();
+        if (!isCurrent) return;
+        const items = records.map((r) =>
+          contentAnalysisService.mapRecordToHistoryItem(r)
+        );
+        setHistoryItems(items);
+      } else {
+        setHistoryItems([]);
+      }
+    }
+
+    loadUserAnalyses();
+
+    return () => {
+      isCurrent = false;
+    };
+  }, [supabaseUser?.id]);
+
+  const handleUploadSuccess = (record: ContentAnalysisRecord) => {
+    setLastUploadedRecord(record);
+    const newItem = contentAnalysisService.mapRecordToHistoryItem(record);
+    setHistoryItems((prev) => [newItem, ...prev.filter((p) => p.id !== record.id)]);
+  };
 
   const handleStartAnalysis = (
     file: File | null,
     duration: number,
     presetId?: string
   ) => {
+    // Only presets trigger the demo analysis walkthrough
     pendingJobRef.current = { file, duration, presetId };
     setIsProcessing(true);
   };
@@ -81,7 +110,6 @@ export const ContentAnalysisPage: React.FC = () => {
     );
     contentAnalysisService.saveCurrentAnalysis(newResult);
     setCurrentAnalysis(newResult);
-    setHistoryItems(contentAnalysisService.getHistory());
     setIsProcessing(false);
     setIsUploadMode(false);
     setActiveTab("overview");
@@ -92,7 +120,7 @@ export const ContentAnalysisPage: React.FC = () => {
   };
 
   const handleSelectHistoryItem = (id: string) => {
-    // If selecting a preset or saved item
+    // If selecting a preset
     const presets = contentAnalysisService.getPresetReels();
     const foundPreset = presets.find((p) => p.result.id === id || p.id === id);
     if (foundPreset) {
@@ -100,16 +128,27 @@ export const ContentAnalysisPage: React.FC = () => {
       setIsUploadMode(false);
       return;
     }
-    // Fallback to latest
-    const latest = contentAnalysisService.getLatestOrDemoAnalysis();
-    setCurrentAnalysis(latest);
-    setIsUploadMode(false);
+
+    // Check if the item has completed analysis_result
+    const selectedHistoryItem = historyItems.find((h) => h.id === id);
+    if (selectedHistoryItem && selectedHistoryItem.status === "completed") {
+      const latest = contentAnalysisService.getLatestOrDemoAnalysis();
+      setCurrentAnalysis(latest);
+      setIsUploadMode(false);
+    } else {
+      // It is an uploaded Reel without completed analysis yet
+      setIsUploadMode(true);
+    }
   };
 
-  const handleDeleteHistoryItem = (id: string) => {
-    contentAnalysisService.deleteHistoryItem(id);
-    setHistoryItems(contentAnalysisService.getHistory());
+  const handleDeleteHistoryItem = async (id: string, filePath?: string) => {
+    await contentAnalysisService.deleteUserAnalysis(id, filePath);
+    setHistoryItems((prev) => prev.filter((item) => item.id !== id));
+    if (lastUploadedRecord?.id === id) {
+      setLastUploadedRecord(null);
+    }
   };
+
 
   const tabs: Array<{
     id: AnalysisTabType;
@@ -179,6 +218,8 @@ export const ContentAnalysisPage: React.FC = () => {
           )}
           <VideoUploader
             onStartAnalysis={handleStartAnalysis}
+            onUploadSuccess={handleUploadSuccess}
+            onOpenHistory={() => setIsHistoryModalOpen(true)}
             isAnalyzing={isProcessing}
           />
         </div>

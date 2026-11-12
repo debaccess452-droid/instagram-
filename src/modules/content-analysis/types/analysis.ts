@@ -281,6 +281,54 @@ export interface ContentAnalysisResult {
 }
 
 /**
+ * Status of the audio analysis pipeline in Supabase
+ */
+export type AudioAnalysisStatus = "pending" | "processing" | "completed" | "failed";
+
+/**
+ * Exact response structure returned by the analyze-audio Supabase Edge Function
+ */
+export interface AudioBackendResult {
+  spoken_dialogue: {
+    full_transcript: string;
+    language: string;
+  };
+  language_detection: {
+    primary_language: string;
+    additional_languages: string[];
+  };
+  voice_characteristics: Array<{
+    speaker_label: string;
+    perceived_voice_presentation: string;
+    tone: string;
+    pace: string;
+    delivery_style: string;
+    emotional_expression: string;
+    evidence_notes: string;
+  }>;
+  background_music: {
+    detected: boolean;
+    description: string;
+  };
+  sound_effects: Array<{
+    start_time_seconds: number;
+    end_time_seconds: number;
+    description: string;
+  }>;
+  timestamped_transcript: Array<{
+    start_time_seconds: number;
+    end_time_seconds: number;
+    spoken_text: string;
+    language: string;
+    speaker_label: string;
+    delivery_notes: string;
+  }>;
+  analysis_metadata: {
+    warnings: string[];
+  };
+}
+
+/**
  * Database record matching public.content_analyses table in Supabase.
  */
 export interface ContentAnalysisRecord {
@@ -291,11 +339,18 @@ export interface ContentAnalysisRecord {
   mime_type: string; // video/mp4, video/quicktime, or video/webm
   file_size_bytes: number; // File size in bytes
   duration_seconds: number | null; // Optional video duration
-  status: "uploaded" | "processing" | "completed" | "failed"; // Defaults to 'uploaded'
-  analysis_result: ContentAnalysisResult | Record<string, unknown> | null; // Reserved for future Gemini results
+  status: "uploaded" | "processing" | "completed" | "failed"; // Overall status
+  analysis_result: ContentAnalysisResult | Record<string, unknown> | null;
   error_message: string | null;
   created_at: string;
   updated_at: string;
+
+  // Dedicated Audio Analysis columns
+  audio_analysis?: AudioBackendResult | null;
+  audio_analysis_status?: AudioAnalysisStatus | null;
+  audio_analysis_error?: string | null;
+  audio_analysis_started_at?: string | null;
+  audio_analysis_completed_at?: string | null;
 }
 
 export interface AnalysisHistoryItem {
@@ -313,6 +368,11 @@ export interface AnalysisHistoryItem {
   fileSizeBytes?: number;
   mimeType?: string;
   createdAt?: string;
+
+  // Real Audio Analysis metadata
+  audioAnalysis?: AudioBackendResult | null;
+  audioAnalysisStatus?: AudioAnalysisStatus | null;
+  audioAnalysisError?: string | null;
 }
 
 export type AnalysisTabType =
@@ -323,4 +383,5 @@ export type AnalysisTabType =
   | "script"
   | "editing"
   | "accuracy";
+
 

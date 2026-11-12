@@ -39,15 +39,19 @@ export type UploadUiStatus = "idle" | "ready" | "uploading" | "success" | "error
 interface VideoUploaderProps {
   onStartAnalysis?: (file: File | null, duration: number, presetId?: string) => void;
   onUploadSuccess?: (record: ContentAnalysisRecord) => void;
+  onAnalyzeAudio?: (record: ContentAnalysisRecord) => void;
   onOpenHistory?: () => void;
   isAnalyzing?: boolean;
+  isAnalyzingAudio?: boolean;
 }
 
 export const VideoUploader: React.FC<VideoUploaderProps> = ({
   onStartAnalysis,
   onUploadSuccess,
+  onAnalyzeAudio,
   onOpenHistory,
   isAnalyzing = false,
+  isAnalyzingAudio = false,
 }) => {
   const { isAuthenticated, supabaseUser } = useAuth();
 
@@ -607,13 +611,32 @@ export const VideoUploader: React.FC<VideoUploaderProps> = ({
                   ) : uploadStatus === "success" ? (
                     /* Success state actions */
                     <>
+                      {onAnalyzeAudio && uploadedRecord && (
+                        <Button
+                          variant="primary"
+                          size="lg"
+                          fullWidth
+                          onClick={() => onAnalyzeAudio(uploadedRecord)}
+                          disabled={isAnalyzingAudio}
+                          leftIcon={
+                            isAnalyzingAudio ? (
+                              <Loader2 className="h-5 w-5 animate-spin" />
+                            ) : (
+                              <Sparkles className="h-5 w-5" />
+                            )
+                          }
+                          className="shadow-glow-primary text-base py-3.5"
+                        >
+                          {isAnalyzingAudio ? "Analyzing Audio..." : "Analyze Audio"}
+                        </Button>
+                      )}
+
                       <Button
-                        variant="primary"
+                        variant="outline"
                         size="lg"
-                        fullWidth
                         onClick={handleRemoveVideo}
-                        leftIcon={<UploadCloud className="h-5 w-5" />}
-                        className="shadow-glow-primary text-base py-3.5"
+                        disabled={isAnalyzingAudio}
+                        className="w-full sm:w-auto"
                       >
                         Upload Another Reel
                       </Button>
@@ -622,6 +645,7 @@ export const VideoUploader: React.FC<VideoUploaderProps> = ({
                           variant="outline"
                           size="lg"
                           onClick={onOpenHistory}
+                          disabled={isAnalyzingAudio}
                           className="w-full sm:w-auto"
                         >
                           View In History

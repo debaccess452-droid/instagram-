@@ -172,19 +172,23 @@ export const AnalysisHistoryModal: React.FC<AnalysisHistoryModalProps> = ({
                         <span
                           className={cn(
                             "inline-flex items-center gap-1 rounded px-2 py-0.5 text-[10px] font-semibold border",
-                            item.status === "uploaded"
-                              ? "bg-primary/15 text-primary border-primary/30"
-                              : item.status === "completed"
+                            item.audioAnalysisStatus === "completed"
                               ? "bg-success/15 text-success border-success/30"
-                              : "bg-warning/15 text-warning border-warning/30"
+                              : item.audioAnalysisStatus === "failed"
+                              ? "bg-error/15 text-error border-error/30"
+                              : item.audioAnalysisStatus === "processing"
+                              ? "bg-amber-500/15 text-amber-400 border-amber-500/30 animate-pulse"
+                              : "bg-primary/15 text-primary border-primary/30"
                           )}
                         >
                           <CheckCircle2 className="h-3 w-3" />
-                          {item.status === "uploaded"
-                            ? "Uploaded (Ready)"
-                            : item.status === "completed"
-                            ? "Analyzed"
-                            : item.status}
+                          {item.audioAnalysisStatus === "completed"
+                            ? "Audio Analyzed"
+                            : item.audioAnalysisStatus === "failed"
+                            ? "Audio Failed"
+                            : item.audioAnalysisStatus === "processing"
+                            ? "Analyzing Audio..."
+                            : "Uploaded"}
                         </span>
                         {item.fileSizeBytes && (
                           <span className="text-[10px] text-text-muted font-mono">
@@ -205,17 +209,11 @@ export const AnalysisHistoryModal: React.FC<AnalysisHistoryModalProps> = ({
                           <Clock className="h-3 w-3 text-primary" />
                           {item.durationFormatted}
                         </span>
-                        {item.status === "completed" && (
-                          <>
-                            <span className="flex items-center gap-1 font-mono">
-                              <Layers className="h-3 w-3 text-trust" />
-                              {item.sceneCount} Scenes
-                            </span>
-                            <span className="flex items-center gap-1 text-success font-mono">
-                              <ShieldCheck className="h-3 w-3" />
-                              {item.accuracyScore}%
-                            </span>
-                          </>
+                        {item.audioAnalysis && (
+                          <span className="flex items-center gap-1 text-success font-mono">
+                            <Sparkles className="h-3 w-3" />
+                            Transcript Ready
+                          </span>
                         )}
                         <span>• {item.uploadedAt}</span>
                       </div>
@@ -257,23 +255,23 @@ export const AnalysisHistoryModal: React.FC<AnalysisHistoryModalProps> = ({
                       </button>
                     )}
 
-                    {item.status === "completed" ? (
-                      <Button
-                        variant="primary"
-                        size="sm"
-                        onClick={() => {
-                          onSelectAnalysis(item.id);
-                          onClose();
-                        }}
-                        rightIcon={<ExternalLink className="h-3.5 w-3.5" />}
-                      >
-                        Open Report
-                      </Button>
-                    ) : (
-                      <span className="text-[11px] text-text-muted font-mono px-2 py-1 bg-background-elevated rounded border border-card-border">
-                        Stored in DB
-                      </span>
-                    )}
+                    <Button
+                      variant={item.audioAnalysisStatus === "completed" ? "primary" : "secondary"}
+                      size="sm"
+                      onClick={() => {
+                        onSelectAnalysis(item.id);
+                        onClose();
+                      }}
+                      rightIcon={<ExternalLink className="h-3.5 w-3.5" />}
+                    >
+                      {item.audioAnalysisStatus === "completed"
+                        ? "Open Analysis"
+                        : item.audioAnalysisStatus === "failed"
+                        ? "View / Retry"
+                        : item.audioAnalysisStatus === "processing"
+                        ? "Check Status"
+                        : "Analyze Audio"}
+                    </Button>
                   </div>
                 </div>
               ))

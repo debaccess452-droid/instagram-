@@ -14,18 +14,21 @@ import {
   CheckCircle2,
   AlertCircle,
   ExternalLink,
+  RotateCcw,
+  Loader2,
 } from "lucide-react";
 import {
   ContentAnalysisResult,
   AnalysisTabType,
   AnalysisHistoryItem,
   ContentAnalysisRecord,
+  AudioBackendResult,
 } from "../types/analysis";
 import { contentAnalysisService } from "../services/contentAnalysisService";
 import { useAuth } from "@/hooks/useAuth";
 import { AnalysisHeader } from "../components/AnalysisHeader";
 import { VideoUploader } from "../components/VideoUploader";
-import { VideoPreviewPlayerRef } from "../components/VideoPreviewPlayer";
+import { VideoPreviewPlayer, VideoPreviewPlayerRef } from "../components/VideoPreviewPlayer";
 import { AnalysisProgressModal } from "../components/AnalysisProgressModal";
 import { AnalysisOverview } from "../components/AnalysisOverview";
 import { AudioAnalysis } from "../components/AudioAnalysis";
@@ -36,24 +39,32 @@ import { EditingBreakdown } from "../components/EditingBreakdown";
 import { AccuracyReport } from "../components/AccuracyReport";
 import { AnalysisHistoryModal } from "../components/AnalysisHistoryModal";
 import { ExportModal } from "../components/ExportModal";
+import { Button } from "@/components/buttons";
 import { cn } from "@/utils/cn";
+
+const ACTIVE_ANALYSIS_STORAGE_KEY = "virulmuse_active_analysis_id";
 
 export const ContentAnalysisPage: React.FC = () => {
   const { supabaseUser } = useAuth();
 
-  const [currentAnalysis, setCurrentAnalysis] = useState<ContentAnalysisResult | null>(
-    null
-  );
-  const [activeTab, setActiveTab] = useState<AnalysisTabType>("overview");
+  // Demo benchmark state (for pre-loaded sample reels)
+  const [currentAnalysis, setCurrentAnalysis] = useState<ContentAnalysisResult | null>(null);
+
+  // Real uploaded Reel state from Supabase
+  const [realAudioRecord, setRealAudioRecord] = useState<ContentAnalysisRecord | null>(null);
+  const [signedVideoUrl, setSignedVideoUrl] = useState<string | null>(null);
+  const [isAnalyzingAudio, setIsAnalyzingAudio] = useState<boolean>(false);
+  const [audioAnalysisError, setAudioAnalysisError] = useState<string | null>(null);
+
+  const [activeTab, setActiveTab] = useState<AnalysisTabType>("audio");
   const [isUploadMode, setIsUploadMode] = useState<boolean>(true);
-  const [isProcessing, setIsProcessing] = useState<boolean>(false);
+  const [isDemoProcessing, setIsDemoProcessing] = useState<boolean>(false);
   const [historyItems, setHistoryItems] = useState<AnalysisHistoryItem[]>([]);
   const [isHistoryModalOpen, setIsHistoryModalOpen] = useState<boolean>(false);
   const [isExportModalOpen, setIsExportModalOpen] = useState<boolean>(false);
-  const [lastUploadedRecord, setLastUploadedRecord] = useState<ContentAnalysisRecord | null>(null);
 
-  // Stored pending file info for processing
-  const pendingJobRef = useRef<{
+  // Pending job ref for demo preset testing only
+  const pendingDemoJobRef = useRef<{
     file: File | null;
     duration: number;
     presetId?: string;
@@ -61,48 +72,152 @@ export const ContentAnalysisPage: React.FC = () => {
 
   const playerRef = useRef<VideoPreviewPlayerRef>(null);
 
-  // Load user records from Supabase on mount and when auth state changes
+  // 1. Load user records from Supabase on mount and restore active record if page reloaded
   useEffect(() => {
     let isCurrent = true;
 
-    async function loadUserAnalyses() {
+    async function loadUserAnalysesAndRestore() {
       if (supabaseUser?.id) {
         const records = await contentAnalysisService.fetchUserAnalyses();
         if (!isCurrent) return;
+
         const items = records.map((r) =>
           contentAnalysisService.mapRecordToHistoryItem(r)
         );
         setHistoryItems(items);
+
+        // Check if there was an active analysis stored before page reload
+        const savedActiveId = localStorage.getItem(ACTIVE_ANALYSIS_STORAGE_KEY);
+        if (savedActiveId) {
+          const matching = records.find((r) => r.id === savedActiveId);
+          if (matching) {
+            setRealAudioRecord(matching);
+            if (matching.audio_analysis_status === "completed") {
+              const url = await contentAnalysisService.getSignedPlaybackUrl(matching.file_path);
+              if (isCurrent) {
+                setSignedVideoUrl(url);
+                setIsUploadMode(false);
+                setActiveTab("audio");
+              }
+            } else if (matching.audio_analysis_status === "failed") {
+              setAudioAnalysisError(matching.audio_analysis_error || "Previous audio analysis failed.");
+              setIsUploadMode(false);
+              setActiveTab("audio");
+            }
+          }
+        }
       } else {
         setHistoryItems([]);
       }
     }
 
-    loadUserAnalyses();
+    loadUserAnalysesAndRestore();
 
     return () => {
       isCurrent = false;
     };
   }, [supabaseUser?.id]);
 
+  // 2. Upload success callback from VideoUploader
   const handleUploadSuccess = (record: ContentAnalysisRecord) => {
-    setLastUploadedRecord(record);
+    setRealAudioRecord(record);
+    setAudioAnalysisError(null);
+    localStorage.setItem(ACTIVE_ANALYSIS_STORAGE_KEY, record.id);
+
     const newItem = contentAnalysisService.mapRecordToHistoryItem(record);
     setHistoryItems((prev) => [newItem, ...prev.filter((p) => p.id !== record.id)]);
   };
 
-  const handleStartAnalysis = (
+  // 3. Real Audio Analysis invocation via Supabase Edge Function 'analyze-audio'
+  const handleAnalyzeAudio = async (recordToAnalyze?: ContentAnalysisRecord | null) => {
+    const targetRecord = recordToAnalyze || realAudioRecord;
+    if (!targetRecord) return;
+
+    if (isAnalyzingAudio) return; // Prevent duplicate clicks while running
+
+    setIsAnalyzingAudio(true);
+    setAudioAnalysisError(null);
+    localStorage.setItem(ACTIVE_ANALYSIS_STORAGE_KEY, targetRecord.id);
+
+    try {
+      const result = await contentAnalysisService.analyzeAudio(targetRecord.id);
+
+      if (result.success && result.audio_analysis) {
+        // Fetch fresh record from database
+        const freshRecord = await contentAnalysisService.fetchAnalysisById(targetRecord.id);
+        const resolvedRecord: ContentAnalysisRecord = freshRecord || {
+          ...targetRecord,
+          audio_analysis: result.audio_analysis,
+          audio_analysis_status: "completed",
+        };
+
+        setRealAudioRecord(resolvedRecord);
+
+        // Get signed playback URL for the Reel player preview
+        const playbackUrl = await contentAnalysisService.getSignedPlaybackUrl(resolvedRecord.file_path);
+        setSignedVideoUrl(playbackUrl);
+
+        // Update history items list
+        const updatedHistoryItem = contentAnalysisService.mapRecordToHistoryItem(resolvedRecord);
+        setHistoryItems((prev) => [
+          updatedHistoryItem,
+          ...prev.filter((p) => p.id !== resolvedRecord.id),
+        ]);
+
+        // Transition to results view on Audio tab
+        setCurrentAnalysis(null);
+        setIsUploadMode(false);
+        setActiveTab("audio");
+      } else {
+        const errorMsg = result.error || "Audio analysis was unable to complete.";
+        setAudioAnalysisError(errorMsg);
+
+        setRealAudioRecord((prev) =>
+          prev
+            ? {
+                ...prev,
+                audio_analysis_status: "failed",
+                audio_analysis_error: errorMsg,
+              }
+            : null
+        );
+
+        // Update history item status
+        setHistoryItems((prev) =>
+          prev.map((item) =>
+            item.id === targetRecord.id
+              ? { ...item, audioAnalysisStatus: "failed", audioAnalysisError: errorMsg }
+              : item
+          )
+        );
+      }
+    } catch (err: any) {
+      const msg = err.message || "An unexpected error occurred during audio analysis.";
+      setAudioAnalysisError(msg);
+    } finally {
+      setIsAnalyzingAudio(false);
+    }
+  };
+
+  // 4. Retry Audio Analysis without re-uploading
+  const handleRetryAudio = () => {
+    if (realAudioRecord) {
+      handleAnalyzeAudio(realAudioRecord);
+    }
+  };
+
+  // 5. Sample Preset Demo handlers (preserved independently)
+  const handleStartDemoAnalysis = (
     file: File | null,
     duration: number,
     presetId?: string
   ) => {
-    // Only presets trigger the demo analysis walkthrough
-    pendingJobRef.current = { file, duration, presetId };
-    setIsProcessing(true);
+    pendingDemoJobRef.current = { file, duration, presetId };
+    setIsDemoProcessing(true);
   };
 
-  const handleProcessingComplete = () => {
-    const { file, duration, presetId } = pendingJobRef.current;
+  const handleDemoProcessingComplete = () => {
+    const { file, duration, presetId } = pendingDemoJobRef.current;
     const newResult = contentAnalysisService.createAnalysisResultForFile(
       file,
       duration,
@@ -110,7 +225,8 @@ export const ContentAnalysisPage: React.FC = () => {
     );
     contentAnalysisService.saveCurrentAnalysis(newResult);
     setCurrentAnalysis(newResult);
-    setIsProcessing(false);
+    setRealAudioRecord(null);
+    setIsDemoProcessing(false);
     setIsUploadMode(false);
     setActiveTab("overview");
   };
@@ -119,36 +235,62 @@ export const ContentAnalysisPage: React.FC = () => {
     playerRef.current?.seekTo(seconds);
   };
 
-  const handleSelectHistoryItem = (id: string) => {
-    // If selecting a preset
+  // 6. History Selection handler
+  const handleSelectHistoryItem = async (id: string) => {
+    // A. Check if selecting a demo preset
     const presets = contentAnalysisService.getPresetReels();
     const foundPreset = presets.find((p) => p.result.id === id || p.id === id);
     if (foundPreset) {
       setCurrentAnalysis(foundPreset.result);
+      setRealAudioRecord(null);
+      setSignedVideoUrl(null);
       setIsUploadMode(false);
+      setActiveTab("overview");
       return;
     }
 
-    // Check if the item has completed analysis_result
-    const selectedHistoryItem = historyItems.find((h) => h.id === id);
-    if (selectedHistoryItem && selectedHistoryItem.status === "completed") {
-      const latest = contentAnalysisService.getLatestOrDemoAnalysis();
-      setCurrentAnalysis(latest);
-      setIsUploadMode(false);
-    } else {
-      // It is an uploaded Reel without completed analysis yet
-      setIsUploadMode(true);
+    // B. Real uploaded Reel from Supabase
+    const record = await contentAnalysisService.fetchAnalysisById(id);
+    if (record) {
+      setRealAudioRecord(record);
+      setCurrentAnalysis(null);
+      localStorage.setItem(ACTIVE_ANALYSIS_STORAGE_KEY, record.id);
+
+      // Fetch signed URL for video preview
+      const signedUrl = await contentAnalysisService.getSignedPlaybackUrl(record.file_path);
+      setSignedVideoUrl(signedUrl);
+
+      if (record.audio_analysis_status === "completed") {
+        setAudioAnalysisError(null);
+        setIsUploadMode(false);
+        setActiveTab("audio");
+      } else if (record.audio_analysis_status === "failed") {
+        setAudioAnalysisError(record.audio_analysis_error || "Audio analysis failed.");
+        setIsUploadMode(false);
+        setActiveTab("audio");
+      } else if (record.audio_analysis_status === "processing") {
+        setIsUploadMode(false);
+        setActiveTab("audio");
+      } else {
+        // Pending / uploaded
+        setAudioAnalysisError(null);
+        setIsUploadMode(false);
+        setActiveTab("audio");
+      }
     }
   };
 
+  // 7. Delete record from Supabase
   const handleDeleteHistoryItem = async (id: string, filePath?: string) => {
     await contentAnalysisService.deleteUserAnalysis(id, filePath);
     setHistoryItems((prev) => prev.filter((item) => item.id !== id));
-    if (lastUploadedRecord?.id === id) {
-      setLastUploadedRecord(null);
+    if (realAudioRecord?.id === id) {
+      setRealAudioRecord(null);
+      setSignedVideoUrl(null);
+      localStorage.removeItem(ACTIVE_ANALYSIS_STORAGE_KEY);
+      setIsUploadMode(true);
     }
   };
-
 
   const tabs: Array<{
     id: AnalysisTabType;
@@ -161,7 +303,9 @@ export const ContentAnalysisPage: React.FC = () => {
       id: "audio",
       label: "Audio Analysis",
       icon: Volume2,
-      count: currentAnalysis?.audioAnalysis.segments.length,
+      count: realAudioRecord?.audio_analysis?.timestamped_transcript?.length
+        ? `${realAudioRecord.audio_analysis.timestamped_transcript.length}`
+        : currentAnalysis?.audioAnalysis.segments.length,
     },
     {
       id: "visual",
@@ -186,41 +330,50 @@ export const ContentAnalysisPage: React.FC = () => {
       id: "accuracy",
       label: "Accuracy Report",
       icon: ShieldCheck,
-      count: `${currentAnalysis?.accuracyReport.overallScore}%`,
+      count: currentAnalysis?.accuracyReport.overallScore
+        ? `${currentAnalysis.accuracyReport.overallScore}%`
+        : undefined,
     },
   ];
+
+  const hasActiveResults = Boolean((currentAnalysis || realAudioRecord) && !isUploadMode);
 
   return (
     <div className="space-y-6 pb-16">
       {/* Page Header */}
       <AnalysisHeader
-        hasResult={Boolean(currentAnalysis && !isUploadMode)}
-        isDemoData={Boolean(currentAnalysis?.isDemoData)}
+        hasResult={hasActiveResults}
+        isDemoData={Boolean(currentAnalysis?.isDemoData && !realAudioRecord)}
         historyCount={historyItems.length}
         onOpenHistory={() => setIsHistoryModalOpen(true)}
         onOpenExport={() => setIsExportModalOpen(true)}
-        onUploadNew={() => setIsUploadMode(true)}
+        onUploadNew={() => {
+          setIsUploadMode(true);
+          setAudioAnalysisError(null);
+        }}
       />
 
-      {/* Upload Mode or Empty State */}
-      {isUploadMode || !currentAnalysis ? (
+      {/* Upload View */}
+      {isUploadMode || (!currentAnalysis && !realAudioRecord) ? (
         <div className="space-y-4">
-          {currentAnalysis && (
+          {(currentAnalysis || realAudioRecord) && (
             <div className="flex justify-end">
               <button
                 type="button"
                 onClick={() => setIsUploadMode(false)}
                 className="text-xs text-primary hover:underline font-medium"
               >
-                ← Return to current analysis ({currentAnalysis.videoTitle})
+                ← Return to current analysis ({realAudioRecord?.file_name || currentAnalysis?.videoTitle})
               </button>
             </div>
           )}
           <VideoUploader
-            onStartAnalysis={handleStartAnalysis}
+            onStartAnalysis={handleStartDemoAnalysis}
             onUploadSuccess={handleUploadSuccess}
+            onAnalyzeAudio={handleAnalyzeAudio}
             onOpenHistory={() => setIsHistoryModalOpen(true)}
-            isAnalyzing={isProcessing}
+            isAnalyzing={isDemoProcessing}
+            isAnalyzingAudio={isAnalyzingAudio}
           />
         </div>
       ) : (
@@ -229,36 +382,94 @@ export const ContentAnalysisPage: React.FC = () => {
           {/* Top Results Video Summary Banner */}
           <div className="rounded-2xl border border-card-border bg-gradient-to-r from-card via-background-elevated to-card p-4 sm:p-5 shadow-card flex flex-col md:flex-row md:items-center justify-between gap-4">
             <div className="flex items-center gap-4">
-              <img
-                src={currentAnalysis.thumbnailUrl}
-                alt={currentAnalysis.videoTitle}
-                className="h-16 w-12 rounded-xl object-cover border border-card-border shrink-0 shadow-md"
-              />
+              <div className="h-16 w-12 rounded-xl bg-background-elevated border border-card-border shrink-0 flex items-center justify-center overflow-hidden shadow-md">
+                {currentAnalysis?.thumbnailUrl ? (
+                  <img
+                    src={currentAnalysis.thumbnailUrl}
+                    alt={currentAnalysis.videoTitle}
+                    className="h-full w-full object-cover"
+                  />
+                ) : (
+                  <Volume2 className="h-6 w-6 text-primary" />
+                )}
+              </div>
 
               <div className="space-y-1">
                 <div className="flex items-center gap-2 flex-wrap">
-                  <span className="inline-flex items-center gap-1 rounded bg-success/15 px-2 py-0.5 text-[11px] font-semibold text-success border border-success/30 font-mono">
-                    <CheckCircle2 className="h-3 w-3" />
-                    Analysis Completed
-                  </span>
+                  {realAudioRecord ? (
+                    <span
+                      className={cn(
+                        "inline-flex items-center gap-1 rounded px-2 py-0.5 text-[11px] font-semibold border font-mono",
+                        realAudioRecord.audio_analysis_status === "completed"
+                          ? "bg-success/15 text-success border-success/30"
+                          : realAudioRecord.audio_analysis_status === "failed"
+                          ? "bg-error/15 text-error border-error/30"
+                          : realAudioRecord.audio_analysis_status === "processing"
+                          ? "bg-amber-500/15 text-amber-400 border-amber-500/30 animate-pulse"
+                          : "bg-primary/15 text-primary border-primary/30"
+                      )}
+                    >
+                      <CheckCircle2 className="h-3 w-3" />
+                      {realAudioRecord.audio_analysis_status === "completed"
+                        ? "Audio Analysis Completed"
+                        : realAudioRecord.audio_analysis_status === "failed"
+                        ? "Audio Analysis Failed"
+                        : realAudioRecord.audio_analysis_status === "processing"
+                        ? "Analyzing Audio..."
+                        : "Uploaded to Supabase"}
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 rounded bg-success/15 px-2 py-0.5 text-[11px] font-semibold text-success border border-success/30 font-mono">
+                      <CheckCircle2 className="h-3 w-3" />
+                      Analysis Completed
+                    </span>
+                  )}
+
                   <span className="text-xs text-text-muted font-mono">
-                    {currentAnalysis.aspectRatio} · {currentAnalysis.detectedLanguage}
+                    {realAudioRecord
+                      ? `${realAudioRecord.mime_type} • Private Storage`
+                      : `${currentAnalysis?.aspectRatio} · ${currentAnalysis?.detectedLanguage}`}
                   </span>
                 </div>
+
                 <h2 className="text-base sm:text-lg font-bold text-text-primary line-clamp-1">
-                  {currentAnalysis.videoTitle}
+                  {realAudioRecord ? realAudioRecord.file_name : currentAnalysis?.videoTitle}
                 </h2>
+
                 <div className="flex items-center gap-3 text-xs text-text-secondary flex-wrap">
                   <span className="flex items-center gap-1 font-mono">
                     <Clock className="h-3 w-3 text-primary" />
-                    {currentAnalysis.formattedDuration}
+                    {realAudioRecord?.duration_seconds
+                      ? contentAnalysisService.formatDuration(realAudioRecord.duration_seconds)
+                      : currentAnalysis?.formattedDuration || "--:--"}
                   </span>
-                  <span>•</span>
-                  <span>{currentAnalysis.visualAnalysis.totalScenes} Scenes</span>
-                  <span>•</span>
-                  <span>{currentAnalysis.audioAnalysis.segments.length} Transcript Segments</span>
-                  <span>•</span>
-                  <span>{currentAnalysis.textExtraction.totalTextElements} Text OCR Layers</span>
+                  {realAudioRecord?.audio_analysis ? (
+                    <>
+                      <span>•</span>
+                      <span>
+                        {realAudioRecord.audio_analysis.timestamped_transcript?.length || 0} Transcript Segments
+                      </span>
+                      <span>•</span>
+                      <span>
+                        Primary Language: {realAudioRecord.audio_analysis.language_detection?.primary_language || "Detected"}
+                      </span>
+                      <span>•</span>
+                      <span>
+                        {realAudioRecord.audio_analysis.background_music?.detected
+                          ? "Music Detected"
+                          : "No Background Music"}
+                      </span>
+                    </>
+                  ) : currentAnalysis ? (
+                    <>
+                      <span>•</span>
+                      <span>{currentAnalysis.visualAnalysis.totalScenes} Scenes</span>
+                      <span>•</span>
+                      <span>{currentAnalysis.audioAnalysis.segments.length} Transcript Segments</span>
+                      <span>•</span>
+                      <span>{currentAnalysis.textExtraction.totalTextElements} Text OCR Layers</span>
+                    </>
+                  ) : null}
                 </div>
               </div>
             </div>
@@ -266,7 +477,10 @@ export const ContentAnalysisPage: React.FC = () => {
             <div className="flex items-center gap-2.5 self-start md:self-center shrink-0">
               <button
                 type="button"
-                onClick={() => setIsUploadMode(true)}
+                onClick={() => {
+                  setIsUploadMode(true);
+                  setAudioAnalysisError(null);
+                }}
                 className="inline-flex items-center gap-1.5 rounded-md border border-card-border bg-background px-3 py-1.5 text-xs font-medium text-text-secondary hover:text-text-primary hover:border-primary/40 transition-colors"
               >
                 <UploadCloud className="h-3.5 w-3.5 text-primary" />
@@ -320,78 +534,148 @@ export const ContentAnalysisPage: React.FC = () => {
 
           {/* Active Tab Workspace */}
           <div className="transition-all">
-            {activeTab === "overview" && (
-              <AnalysisOverview
-                result={currentAnalysis}
-                playerRef={playerRef}
-                onSeek={handleSeekVideo}
-                onSelectTab={setActiveTab}
-              />
-            )}
+            {/* REAL AUDIO RECORD ACTIVE */}
+            {realAudioRecord ? (
+              activeTab === "audio" ? (
+                <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+                  {/* Left Column: Player Preview if video URL is available */}
+                  <div className="lg:col-span-4 sticky top-6">
+                    <div className="w-full max-w-sm mx-auto space-y-3">
+                      <VideoPreviewPlayer
+                        ref={playerRef}
+                        src={signedVideoUrl || undefined}
+                        poster="https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=600&auto=format&fit=crop&q=80"
+                        durationSeconds={realAudioRecord.duration_seconds || 30}
+                        aspectRatio="9:16"
+                      />
+                      <div className="rounded-xl border border-card-border bg-card p-3 text-xs text-text-secondary space-y-1">
+                        <p className="font-semibold text-text-primary line-clamp-1">
+                          {realAudioRecord.file_name}
+                        </p>
+                        <p className="text-[11px] text-text-muted font-mono">
+                          Click any timestamp in the Spoken Dialogue timeline or Sound Effects to jump to that moment in the video.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
 
-            {activeTab === "audio" && (
-              <AudioAnalysis
-                data={currentAnalysis.audioAnalysis}
-                onSeek={handleSeekVideo}
-                isDemoData={Boolean(currentAnalysis.isDemoData)}
-              />
-            )}
+                  {/* Right Column: Audio Analysis Results */}
+                  <div className="lg:col-span-8">
+                    <AudioAnalysis
+                      realData={realAudioRecord.audio_analysis}
+                      status={realAudioRecord.audio_analysis_status}
+                      errorMessage={audioAnalysisError || realAudioRecord.audio_analysis_error}
+                      onRetry={handleRetryAudio}
+                      onAnalyzeAudio={() => handleAnalyzeAudio(realAudioRecord)}
+                      isProcessing={isAnalyzingAudio}
+                      onSeek={handleSeekVideo}
+                    />
+                  </div>
+                </div>
+              ) : (
+                /* Non-Audio Tabs for real uploaded Reel */
+                <div className="rounded-2xl border border-card-border bg-card p-8 sm:p-12 text-center space-y-4 shadow-card">
+                  <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-primary/10 border border-primary/20 text-primary mx-auto">
+                    <Sparkles className="h-7 w-7" />
+                  </div>
+                  <div className="max-w-md mx-auto space-y-2">
+                    <h3 className="text-lg font-bold text-text-primary">
+                      {tabs.find((t) => t.id === activeTab)?.label} Pipeline Integration
+                    </h3>
+                    <p className="text-xs text-text-secondary leading-relaxed">
+                      This analysis module will be connected in subsequent steps.
+                      Real Audio Analysis is currently connected and active for this uploaded Reel.
+                    </p>
+                  </div>
+                  <div className="pt-2">
+                    <Button
+                      variant="primary"
+                      size="sm"
+                      onClick={() => setActiveTab("audio")}
+                      leftIcon={<Volume2 className="h-4 w-4" />}
+                    >
+                      View Real Audio Analysis
+                    </Button>
+                  </div>
+                </div>
+              )
+            ) : currentAnalysis ? (
+              /* DEMO PRESET ACTIVE */
+              <>
+                {activeTab === "overview" && (
+                  <AnalysisOverview
+                    result={currentAnalysis}
+                    playerRef={playerRef}
+                    onSeek={handleSeekVideo}
+                    onSelectTab={setActiveTab}
+                  />
+                )}
 
-            {activeTab === "visual" && (
-              <VisualAnalysis
-                data={currentAnalysis.visualAnalysis}
-                onSeek={handleSeekVideo}
-                isDemoData={Boolean(currentAnalysis.isDemoData)}
-              />
-            )}
+                {activeTab === "audio" && (
+                  <AudioAnalysis
+                    data={currentAnalysis.audioAnalysis}
+                    onSeek={handleSeekVideo}
+                    isDemoData={Boolean(currentAnalysis.isDemoData)}
+                  />
+                )}
 
-            {activeTab === "text" && (
-              <TextExtraction
-                data={currentAnalysis.textExtraction}
-                onSeek={handleSeekVideo}
-                isDemoData={Boolean(currentAnalysis.isDemoData)}
-              />
-            )}
+                {activeTab === "visual" && (
+                  <VisualAnalysis
+                    data={currentAnalysis.visualAnalysis}
+                    onSeek={handleSeekVideo}
+                    isDemoData={Boolean(currentAnalysis.isDemoData)}
+                  />
+                )}
 
-            {activeTab === "script" && (
-              <OriginalScriptTable
-                scriptTable={currentAnalysis.scriptTable}
-                videoTitle={currentAnalysis.videoTitle}
-                onSeek={handleSeekVideo}
-                onOpenExport={() => setIsExportModalOpen(true)}
-                isDemoData={Boolean(currentAnalysis.isDemoData)}
-              />
-            )}
+                {activeTab === "text" && (
+                  <TextExtraction
+                    data={currentAnalysis.textExtraction}
+                    onSeek={handleSeekVideo}
+                    isDemoData={Boolean(currentAnalysis.isDemoData)}
+                  />
+                )}
 
-            {activeTab === "editing" && (
-              <EditingBreakdown
-                data={currentAnalysis.editingBreakdown}
-                videoTitle={currentAnalysis.videoTitle}
-                onSeek={handleSeekVideo}
-                isDemoData={Boolean(currentAnalysis.isDemoData)}
-              />
-            )}
+                {activeTab === "script" && (
+                  <OriginalScriptTable
+                    scriptTable={currentAnalysis.scriptTable}
+                    videoTitle={currentAnalysis.videoTitle}
+                    onSeek={handleSeekVideo}
+                    onOpenExport={() => setIsExportModalOpen(true)}
+                    isDemoData={Boolean(currentAnalysis.isDemoData)}
+                  />
+                )}
 
-            {activeTab === "accuracy" && (
-              <AccuracyReport
-                data={currentAnalysis.accuracyReport}
-                onSeek={handleSeekVideo}
-              />
-            )}
+                {activeTab === "editing" && (
+                  <EditingBreakdown
+                    data={currentAnalysis.editingBreakdown}
+                    videoTitle={currentAnalysis.videoTitle}
+                    onSeek={handleSeekVideo}
+                    isDemoData={Boolean(currentAnalysis.isDemoData)}
+                  />
+                )}
+
+                {activeTab === "accuracy" && (
+                  <AccuracyReport
+                    data={currentAnalysis.accuracyReport}
+                    onSeek={handleSeekVideo}
+                  />
+                )}
+              </>
+            ) : null}
           </div>
         </div>
       )}
 
-      {/* 8-Stage Processing Modal */}
+      {/* Demo Preset 8-Stage Processing Modal (only used when testing sample presets) */}
       <AnalysisProgressModal
-        isOpen={isProcessing}
+        isOpen={isDemoProcessing}
         videoTitle={
-          pendingJobRef.current.file
-            ? pendingJobRef.current.file.name
+          pendingDemoJobRef.current.file
+            ? pendingDemoJobRef.current.file.name
             : "Sample Viral Reel"
         }
-        onComplete={handleProcessingComplete}
-        onCancel={() => setIsProcessing(false)}
+        onComplete={handleDemoProcessingComplete}
+        onCancel={() => setIsDemoProcessing(false)}
       />
 
       {/* History Modal */}

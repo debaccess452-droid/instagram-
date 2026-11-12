@@ -41,6 +41,7 @@ export interface VisualAnalysisProps {
   onRetry?: () => void;
   onAnalyzeVisual?: () => void;
   isProcessing?: boolean;
+  progressStepMessage?: string | null;
 }
 
 /**
@@ -113,6 +114,7 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
   onRetry,
   onAnalyzeVisual,
   isProcessing = false,
+  progressStepMessage,
 }) => {
   const [copiedSceneId, setCopiedSceneId] = useState<string | number | null>(null);
   const [copiedAll, setCopiedAll] = useState(false);
@@ -129,7 +131,7 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
         </div>
         <div className="max-w-md mx-auto space-y-2">
           <h3 className="text-lg font-bold text-text-primary">
-            Waiting for analysis...
+            {progressStepMessage || "Waiting for analysis..."}
           </h3>
           <p className="text-xs text-text-secondary leading-relaxed">
             Your Reel visual analysis job is queued with the secure background processor. Polling for results...
@@ -154,7 +156,7 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
         </div>
         <div className="max-w-md mx-auto space-y-2">
           <h3 className="text-lg font-bold text-text-primary">
-            Analyzing your Reel...
+            {progressStepMessage || "Analyzing your Reel..."}
           </h3>
           <p className="text-xs text-text-secondary leading-relaxed">
             Extracting scene breakdown, identifying visible subjects, actions & clothing,

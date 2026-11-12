@@ -6,6 +6,7 @@ import {
   AudioAnalysisStatus,
   VisualBackendResult,
   VisualAnalysisStatus,
+  FramePathItem,
   ScriptTableRow,
   EditingTimelineEvent,
 } from "../types/analysis";
@@ -16,6 +17,7 @@ import {
 import { supabase } from "@/lib/supabase";
 
 export const STORAGE_BUCKET = "reel-uploads";
+export const VISUAL_FRAMES_BUCKET = "visual-analysis-frames";
 export const TABLE_CONTENT_ANALYSES = "content_analyses";
 
 const STORAGE_KEY_CURRENT = "virulmuse_current_analysis";
@@ -359,11 +361,250 @@ class ContentAnalysisService {
   }
 
   /**
+   * Downloads original uploaded Reel video Blob from private storage (reel-uploads).
+   */
+  public async downloadReelVideo(filePath: string): Promise<Blob> {
+    const { data, error } = await supabase.storage
+      .from(STORAGE_BUCKET)
+      .download(filePath);
+
+    if (error || !data) {
+      throw new Error(
+        `Failed to download uploaded Reel video: ${error?.message || "File not found"}`
+      );
+    }
+
+    return data;
+  }
+
+  /**
+   * Extracts up to 3 representative JPEG frames from video blob
+   * at approximately 10%, 50%, and 90% of duration.
+   * Resizes proportionally to <= 960px max dimension.
+   * Compresses to JPEG <= 2 MB.
+   * Releases all temporary object URLs and video resources.
+   */
+  public async extractRepresentativeFrames(
+    videoBlob: Blob
+  ): Promise<Array<{ blob: Blob; timestamp_seconds: number }>> {
+    const objectUrl = URL.createObjectURL(videoBlob);
+    const video = document.createElement("video");
+    video.preload = "auto";
+    video.muted = true;
+    video.playsInline = true;
+    video.crossOrigin = "anonymous";
+
+    try {
+      // 1. Wait for video metadata to load with a 20s timeout
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          cleanupListeners();
+          reject(new Error("Timeout loading video metadata for frame extraction."));
+        }, 20000);
+
+        const onLoaded = () => {
+          cleanupListeners();
+          clearTimeout(timer);
+          resolve();
+        };
+
+        const onError = () => {
+          cleanupListeners();
+          clearTimeout(timer);
+          reject(new Error("Unable to read video bitstream for frame extraction."));
+        };
+
+        const cleanupListeners = () => {
+          video.removeEventListener("loadedmetadata", onLoaded);
+          video.removeEventListener("error", onError);
+        };
+
+        video.addEventListener("loadedmetadata", onLoaded);
+        video.addEventListener("error", onError);
+        video.src = objectUrl;
+      });
+
+      const duration = video.duration;
+      const safeDuration = Number.isFinite(duration) && duration > 0 ? duration : 30;
+
+      // 2. Select up to 3 representative timestamps at approx 10%, 50%, 90%
+      const candidatePercents = [0.1, 0.5, 0.9];
+      const targetTimestamps: number[] = [];
+
+      for (const pct of candidatePercents) {
+        let t = Number((safeDuration * pct).toFixed(2));
+        // Clamp strictly within [0.05, safeDuration - 0.05]
+        t = Math.max(0.05, Math.min(t, Math.max(0.05, safeDuration - 0.05)));
+
+        // Avoid duplicate timestamps for short videos
+        const isDuplicate = targetTimestamps.some(
+          (existing) => Math.abs(existing - t) < 0.15
+        );
+        if (!isDuplicate) {
+          targetTimestamps.push(t);
+        }
+      }
+
+      if (targetTimestamps.length === 0) {
+        targetTimestamps.push(0.05);
+      }
+
+      const extracted: Array<{ blob: Blob; timestamp_seconds: number }> = [];
+
+      // 3. Capture each frame
+      for (const timestamp of targetTimestamps) {
+        await new Promise<void>((resolve, reject) => {
+          const seekTimer = setTimeout(() => {
+            cleanupSeek();
+            reject(
+              new Error(
+                `Timeout seeking video to ${timestamp}s for frame capture.`
+              )
+            );
+          }, 10000);
+
+          const onSeeked = () => {
+            cleanupSeek();
+            clearTimeout(seekTimer);
+            resolve();
+          };
+
+          const onSeekError = () => {
+            cleanupSeek();
+            clearTimeout(seekTimer);
+            reject(
+              new Error(
+                `Error seeking video to ${timestamp}s for frame capture.`
+              )
+            );
+          };
+
+          const cleanupSeek = () => {
+            video.removeEventListener("seeked", onSeeked);
+            video.removeEventListener("error", onSeekError);
+          };
+
+          video.addEventListener("seeked", onSeeked);
+          video.addEventListener("error", onSeekError);
+          video.currentTime = timestamp;
+        });
+
+        // Calculate aspect-ratio preserved dimensions (longest dim <= 960)
+        const origW = video.videoWidth || 720;
+        const origH = video.videoHeight || 1280;
+        const maxDim = 960;
+
+        let targetW = origW;
+        let targetH = origH;
+
+        if (origW > maxDim || origH > maxDim) {
+          if (origW >= origH) {
+            targetW = maxDim;
+            targetH = Math.max(1, Math.round((origH * maxDim) / origW));
+          } else {
+            targetH = maxDim;
+            targetW = Math.max(1, Math.round((origW * maxDim) / origH));
+          }
+        }
+
+        const canvas = document.createElement("canvas");
+        canvas.width = targetW;
+        canvas.height = targetH;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+          throw new Error("Canvas context initialization failed.");
+        }
+        ctx.drawImage(video, 0, 0, targetW, targetH);
+
+        // Encode as JPEG quality 0.72, reducing if > 2MB
+        let quality = 0.72;
+        let frameBlob = await new Promise<Blob | null>((res) =>
+          canvas.toBlob(res, "image/jpeg", quality)
+        );
+
+        while (
+          frameBlob &&
+          frameBlob.size > 2 * 1024 * 1024 &&
+          quality > 0.3
+        ) {
+          quality -= 0.15;
+          frameBlob = await new Promise<Blob | null>((res) =>
+            canvas.toBlob(res, "image/jpeg", quality)
+          );
+        }
+
+        if (!frameBlob) {
+          throw new Error(
+            `Failed to encode video frame at ${timestamp}s as JPEG.`
+          );
+        }
+
+        extracted.push({
+          blob: frameBlob,
+          timestamp_seconds: timestamp,
+        });
+
+        // Release canvas memory
+        canvas.width = 0;
+        canvas.height = 0;
+      }
+
+      return extracted;
+    } finally {
+      // 4. Release all temporary object URLs and video resources
+      URL.revokeObjectURL(objectUrl);
+      video.removeAttribute("src");
+      video.load();
+    }
+  }
+
+  /**
+   * Uploads extracted JPEG frames to private visual-analysis-frames bucket
+   * using exact path format: {userId}/{analysisId}/frame-{index}.jpg
+   * Returns framePaths manifest for Edge Function invocation.
+   */
+  public async uploadAnalysisFrames(
+    userId: string,
+    analysisId: string,
+    frames: Array<{ blob: Blob; timestamp_seconds: number }>
+  ): Promise<FramePathItem[]> {
+    const framePaths: FramePathItem[] = [];
+
+    for (let i = 0; i < frames.length; i++) {
+      const frame = frames[i];
+      const storagePath = `${userId}/${analysisId}/frame-${i}.jpg`;
+
+      const { error } = await supabase.storage
+        .from(VISUAL_FRAMES_BUCKET)
+        .upload(storagePath, frame.blob, {
+          contentType: "image/jpeg",
+          upsert: true,
+        });
+
+      if (error) {
+        throw new Error(
+          `Failed to upload frame ${i + 1} to storage: ${error.message}`
+        );
+      }
+
+      framePaths.push({
+        path: storagePath,
+        timestamp_seconds: frame.timestamp_seconds,
+      });
+    }
+
+    return framePaths;
+  }
+
+  /**
    * Invokes the deployed Supabase Edge Function 'analyze-visual'
-   * for the given analysisId using the authenticated session.
+   * for the given analysisId and framePaths manifest using the authenticated session.
    * Supports asynchronous backend: { success: true, queued: true, analysisId, status: "queued" }.
    */
-  public async analyzeVisual(analysisId: string): Promise<{
+  public async analyzeVisual(
+    analysisId: string,
+    framePaths?: FramePathItem[]
+  ): Promise<{
     success: boolean;
     queued?: boolean;
     status?: VisualAnalysisStatus;
@@ -384,10 +625,19 @@ class ContentAnalysisService {
         };
       }
 
+      const bodyPayload: {
+        analysisId: string;
+        framePaths?: FramePathItem[];
+      } = {
+        analysisId,
+      };
+
+      if (framePaths && framePaths.length > 0) {
+        bodyPayload.framePaths = framePaths;
+      }
+
       const { data, error } = await supabase.functions.invoke("analyze-visual", {
-        body: {
-          analysisId,
-        },
+        body: bodyPayload,
       });
 
       if (error) {

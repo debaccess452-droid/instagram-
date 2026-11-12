@@ -333,6 +333,11 @@ export interface AudioBackendResult {
  */
 export type VisualAnalysisStatus = "queued" | "pending" | "processing" | "completed" | "failed";
 
+export interface FramePathItem {
+  path: string;
+  timestamp_seconds: number;
+}
+
 export interface VisualBackendSceneSubject {
   subject_label: string;
   visible_appearance: string;

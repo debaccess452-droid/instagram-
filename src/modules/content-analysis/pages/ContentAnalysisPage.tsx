@@ -26,6 +26,7 @@ import {
   VisualAnalysisStatus,
 } from "../types/analysis";
 import { contentAnalysisService } from "../services/contentAnalysisService";
+import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/hooks/useAuth";
 import { AnalysisHeader } from "../components/AnalysisHeader";
 import { VideoUploader } from "../components/VideoUploader";
@@ -58,6 +59,7 @@ export const ContentAnalysisPage: React.FC = () => {
   const [audioAnalysisError, setAudioAnalysisError] = useState<string | null>(null);
   const [isAnalyzingVisual, setIsAnalyzingVisual] = useState<boolean>(false);
   const [visualAnalysisError, setVisualAnalysisError] = useState<string | null>(null);
+  const [visualProgressMessage, setVisualProgressMessage] = useState<string | null>(null);
 
   const [activeTab, setActiveTab] = useState<AnalysisTabType>("audio");
   const [isUploadMode, setIsUploadMode] = useState<boolean>(true);
@@ -232,6 +234,7 @@ export const ContentAnalysisPage: React.FC = () => {
 
     setIsAnalyzingVisual(true);
     setVisualAnalysisError(null);
+    setVisualProgressMessage("Preparing video frames...");
     localStorage.setItem(ACTIVE_ANALYSIS_STORAGE_KEY, targetRecord.id);
 
     // Set initial status to queued in UI
@@ -246,10 +249,38 @@ export const ContentAnalysisPage: React.FC = () => {
     );
 
     try {
-      const result = await contentAnalysisService.analyzeVisual(targetRecord.id);
+      // 1. Get authenticated user ID
+      const {
+        data: { session },
+        error: sessionError,
+      } = await supabase.auth.getSession();
+
+      const userId = session?.user?.id;
+      if (sessionError || !userId) {
+        throw new Error("Authentication required: Please sign in to run Visual Analysis.");
+      }
+
+      // 2. Download original uploaded Reel from private storage
+      const videoBlob = await contentAnalysisService.downloadReelVideo(targetRecord.file_path);
+
+      // 3. Extract up to 3 representative JPEG frames (at ~10%, ~50%, ~90% of duration)
+      const extractedFrames = await contentAnalysisService.extractRepresentativeFrames(videoBlob);
+
+      // 4. Upload frames to private visual-analysis-frames bucket
+      setVisualProgressMessage("Uploading secure analysis frames...");
+      const framePaths = await contentAnalysisService.uploadAnalysisFrames(
+        userId,
+        targetRecord.id,
+        extractedFrames
+      );
+
+      // 5. Invoke analyze-visual with analysisId and framePaths manifest
+      setVisualProgressMessage("Starting visual analysis...");
+      const result = await contentAnalysisService.analyzeVisual(targetRecord.id, framePaths);
 
       if (result.success) {
         // Backend returns immediately: { success: true, queued: true, analysisId, status: "queued" }
+        setVisualProgressMessage("Visual analysis queued...");
         const newStatus: VisualAnalysisStatus = result.status || "queued";
 
         setRealAudioRecord((prev) =>
@@ -290,6 +321,7 @@ export const ContentAnalysisPage: React.FC = () => {
 
           setRealAudioRecord(resolvedRecord);
           setIsAnalyzingVisual(false);
+          setVisualProgressMessage(null);
 
           const updatedHistoryItem = contentAnalysisService.mapRecordToHistoryItem(resolvedRecord);
           setHistoryItems((prev) => [
@@ -305,6 +337,7 @@ export const ContentAnalysisPage: React.FC = () => {
       } else {
         const errorMsg = result.error || "Visual analysis was unable to complete.";
         setVisualAnalysisError(errorMsg);
+        setVisualProgressMessage(null);
         setIsAnalyzingVisual(false);
 
         setRealAudioRecord((prev) =>
@@ -329,6 +362,7 @@ export const ContentAnalysisPage: React.FC = () => {
     } catch (err: any) {
       const msg = err.message || "An unexpected error occurred during visual analysis.";
       setVisualAnalysisError(msg);
+      setVisualProgressMessage(null);
       setIsAnalyzingVisual(false);
 
       setRealAudioRecord((prev) =>
@@ -373,6 +407,7 @@ export const ContentAnalysisPage: React.FC = () => {
           if (statusData.visual_analysis_status === "completed") {
             stopVisualPolling();
             setIsAnalyzingVisual(false);
+            setVisualProgressMessage(null);
             setVisualAnalysisError(null);
 
             const freshRecord = await contentAnalysisService.fetchAnalysisById(currentRecordId);
@@ -387,6 +422,7 @@ export const ContentAnalysisPage: React.FC = () => {
           } else if (statusData.visual_analysis_status === "failed") {
             stopVisualPolling();
             setIsAnalyzingVisual(false);
+            setVisualProgressMessage(null);
             const errorMsg = statusData.visual_analysis_error || "Visual analysis was unable to complete.";
             setVisualAnalysisError(errorMsg);
 
@@ -839,6 +875,7 @@ export const ContentAnalysisPage: React.FC = () => {
                       onRetry={handleRetryVisual}
                       onAnalyzeVisual={() => handleAnalyzeVisual(realAudioRecord)}
                       isProcessing={isAnalyzingVisual}
+                      progressStepMessage={visualProgressMessage}
                       onSeek={handleSeekVideo}
                     />
                   </div>

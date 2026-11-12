@@ -4,6 +4,8 @@ import {
   ContentAnalysisRecord,
   AudioBackendResult,
   AudioAnalysisStatus,
+  VisualBackendResult,
+  VisualAnalysisStatus,
   ScriptTableRow,
   EditingTimelineEvent,
 } from "../types/analysis";
@@ -357,6 +359,71 @@ class ContentAnalysisService {
   }
 
   /**
+   * Invokes the deployed Supabase Edge Function 'analyze-visual'
+   * for the given analysisId using the authenticated session.
+   */
+  public async analyzeVisual(analysisId: string): Promise<{
+    success: boolean;
+    analysisId?: string;
+    visual_analysis?: VisualBackendResult;
+    error?: string;
+  }> {
+    try {
+      const {
+        data: { session },
+        error: sessionError,
+      } = await supabase.auth.getSession();
+
+      if (sessionError || !session?.user) {
+        return {
+          success: false,
+          error: "Authentication required: Please sign in to analyze Reel visuals.",
+        };
+      }
+
+      const { data, error } = await supabase.functions.invoke("analyze-visual", {
+        body: {
+          analysisId,
+        },
+      });
+
+      if (error) {
+        let msg = error.message;
+        if ((error as any).context && typeof (error as any).context?.json === "function") {
+          try {
+            const body = await (error as any).context.json();
+            if (body?.error) {
+              msg = body.error;
+            }
+          } catch {}
+        }
+        return {
+          success: false,
+          error: msg || "Visual analysis invocation failed.",
+        };
+      }
+
+      if (data && data.success === false) {
+        return {
+          success: false,
+          error: data.error || "Visual analysis returned an error.",
+        };
+      }
+
+      return {
+        success: true,
+        analysisId: data?.analysisId || analysisId,
+        visual_analysis: data?.visual_analysis,
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        error: err.message || "Failed to invoke analyze-visual function.",
+      };
+    }
+  }
+
+  /**
    * Fetches a single ContentAnalysisRecord by ID for the authenticated user.
    */
   public async fetchAnalysisById(
@@ -421,7 +488,10 @@ class ContentAnalysisService {
       uploadedAt: dateFormatted,
       durationFormatted,
       status: record.status,
-      sceneCount: result?.visualAnalysis?.totalScenes || 0,
+      sceneCount:
+        record.visual_analysis?.scenes?.length ||
+        result?.visualAnalysis?.totalScenes ||
+        0,
       accuracyScore: result?.accuracyReport?.overallScore || 0,
       isDemo: false,
       filePath: record.file_path,
@@ -431,6 +501,9 @@ class ContentAnalysisService {
       audioAnalysis: record.audio_analysis || null,
       audioAnalysisStatus: record.audio_analysis_status || null,
       audioAnalysisError: record.audio_analysis_error || null,
+      visualAnalysis: record.visual_analysis || null,
+      visualAnalysisStatus: record.visual_analysis_status || null,
+      visualAnalysisError: record.visual_analysis_error || null,
     };
   }
 

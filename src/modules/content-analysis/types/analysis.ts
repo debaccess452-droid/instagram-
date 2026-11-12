@@ -329,6 +329,86 @@ export interface AudioBackendResult {
 }
 
 /**
+ * Status of the visual analysis pipeline in Supabase
+ */
+export type VisualAnalysisStatus = "pending" | "processing" | "completed" | "failed";
+
+export interface VisualBackendSceneSubject {
+  subject_label: string;
+  visible_appearance: string;
+  clothing: string;
+  visible_action: string;
+}
+
+export interface VisualBackendSceneEnvironment {
+  setting: string;
+  background: string;
+  visible_objects: string[];
+}
+
+export interface VisualBackendSceneCamera {
+  shot_framing: string;
+  camera_angle: string;
+  camera_movement: string;
+  evidence_notes: string;
+}
+
+export interface VisualBackendSceneComposition {
+  subject_placement: string;
+  dominant_colours: string[];
+  contrast_and_lighting_appearance: string;
+}
+
+export interface VisualBackendScene {
+  scene_number: number;
+  start_time_seconds: number;
+  end_time_seconds: number;
+  scene_description: string;
+  visible_subjects: VisualBackendSceneSubject[];
+  environment: VisualBackendSceneEnvironment;
+  camera: VisualBackendSceneCamera;
+  composition: VisualBackendSceneComposition;
+  on_screen_text: string[];
+}
+
+export interface VisualBackendTransition {
+  timestamp_seconds: number;
+  transition_type: string;
+  observable_change: string;
+}
+
+export interface VisualBackendElements {
+  readable_text: string[];
+  logos_and_graphics: string[];
+  recurring_visual_elements: string[];
+}
+
+export interface VisualBackendMetadata {
+  warnings: string[];
+  frame_sampling_fps?: number;
+  model?: string;
+  source?: string;
+  is_demo_data?: boolean;
+  analyzed_at?: string;
+}
+
+export interface VisualBackendOverview {
+  summary: string;
+  duration_observation: string;
+}
+
+/**
+ * Exact response structure returned by the analyze-visual Supabase Edge Function
+ */
+export interface VisualBackendResult {
+  video_overview: VisualBackendOverview;
+  scenes: VisualBackendScene[];
+  transitions: VisualBackendTransition[];
+  visual_elements: VisualBackendElements;
+  analysis_metadata: VisualBackendMetadata;
+}
+
+/**
  * Database record matching public.content_analyses table in Supabase.
  */
 export interface ContentAnalysisRecord {
@@ -351,6 +431,13 @@ export interface ContentAnalysisRecord {
   audio_analysis_error?: string | null;
   audio_analysis_started_at?: string | null;
   audio_analysis_completed_at?: string | null;
+
+  // Dedicated Visual Analysis columns
+  visual_analysis?: VisualBackendResult | null;
+  visual_analysis_status?: VisualAnalysisStatus | null;
+  visual_analysis_error?: string | null;
+  visual_analysis_started_at?: string | null;
+  visual_analysis_completed_at?: string | null;
 }
 
 export interface AnalysisHistoryItem {
@@ -373,6 +460,11 @@ export interface AnalysisHistoryItem {
   audioAnalysis?: AudioBackendResult | null;
   audioAnalysisStatus?: AudioAnalysisStatus | null;
   audioAnalysisError?: string | null;
+
+  // Real Visual Analysis metadata
+  visualAnalysis?: VisualBackendResult | null;
+  visualAnalysisStatus?: VisualAnalysisStatus | null;
+  visualAnalysisError?: string | null;
 }
 
 export type AnalysisTabType =

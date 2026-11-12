@@ -55,6 +55,8 @@ export const ContentAnalysisPage: React.FC = () => {
   const [signedVideoUrl, setSignedVideoUrl] = useState<string | null>(null);
   const [isAnalyzingAudio, setIsAnalyzingAudio] = useState<boolean>(false);
   const [audioAnalysisError, setAudioAnalysisError] = useState<string | null>(null);
+  const [isAnalyzingVisual, setIsAnalyzingVisual] = useState<boolean>(false);
+  const [visualAnalysisError, setVisualAnalysisError] = useState<string | null>(null);
 
   const [activeTab, setActiveTab] = useState<AnalysisTabType>("audio");
   const [isUploadMode, setIsUploadMode] = useState<boolean>(true);
@@ -92,18 +94,17 @@ export const ContentAnalysisPage: React.FC = () => {
           const matching = records.find((r) => r.id === savedActiveId);
           if (matching) {
             setRealAudioRecord(matching);
-            if (matching.audio_analysis_status === "completed") {
-              const url = await contentAnalysisService.getSignedPlaybackUrl(matching.file_path);
-              if (isCurrent) {
-                setSignedVideoUrl(url);
-                setIsUploadMode(false);
-                setActiveTab("audio");
-              }
-            } else if (matching.audio_analysis_status === "failed") {
-              setAudioAnalysisError(matching.audio_analysis_error || "Previous audio analysis failed.");
-              setIsUploadMode(false);
-              setActiveTab("audio");
+            const url = await contentAnalysisService.getSignedPlaybackUrl(matching.file_path);
+            if (isCurrent && url) {
+              setSignedVideoUrl(url);
             }
+            if (matching.audio_analysis_status === "failed") {
+              setAudioAnalysisError(matching.audio_analysis_error || "Previous audio analysis failed.");
+            }
+            if (matching.visual_analysis_status === "failed") {
+              setVisualAnalysisError(matching.visual_analysis_error || "Previous visual analysis failed.");
+            }
+            setIsUploadMode(false);
           }
         }
       } else {
@@ -122,6 +123,7 @@ export const ContentAnalysisPage: React.FC = () => {
   const handleUploadSuccess = (record: ContentAnalysisRecord) => {
     setRealAudioRecord(record);
     setAudioAnalysisError(null);
+    setVisualAnalysisError(null);
     localStorage.setItem(ACTIVE_ANALYSIS_STORAGE_KEY, record.id);
 
     const newItem = contentAnalysisService.mapRecordToHistoryItem(record);
@@ -206,6 +208,101 @@ export const ContentAnalysisPage: React.FC = () => {
     }
   };
 
+  // 5. Real Visual Analysis invocation via Supabase Edge Function 'analyze-visual'
+  const handleAnalyzeVisual = async (recordToAnalyze?: ContentAnalysisRecord | null) => {
+    const targetRecord = recordToAnalyze || realAudioRecord;
+    if (!targetRecord) return;
+
+    if (isAnalyzingVisual) return; // Prevent duplicate clicks while running
+
+    setIsAnalyzingVisual(true);
+    setVisualAnalysisError(null);
+    localStorage.setItem(ACTIVE_ANALYSIS_STORAGE_KEY, targetRecord.id);
+
+    try {
+      const result = await contentAnalysisService.analyzeVisual(targetRecord.id);
+
+      if (result.success && result.visual_analysis) {
+        // Fetch fresh record from database
+        const freshRecord = await contentAnalysisService.fetchAnalysisById(targetRecord.id);
+        const resolvedRecord: ContentAnalysisRecord = freshRecord || {
+          ...targetRecord,
+          visual_analysis: result.visual_analysis,
+          visual_analysis_status: "completed",
+        };
+
+        setRealAudioRecord(resolvedRecord);
+
+        // Ensure signed playback URL is loaded
+        if (!signedVideoUrl) {
+          const playbackUrl = await contentAnalysisService.getSignedPlaybackUrl(resolvedRecord.file_path);
+          if (playbackUrl) {
+            setSignedVideoUrl(playbackUrl);
+          }
+        }
+
+        // Update history items list
+        const updatedHistoryItem = contentAnalysisService.mapRecordToHistoryItem(resolvedRecord);
+        setHistoryItems((prev) => [
+          updatedHistoryItem,
+          ...prev.filter((p) => p.id !== resolvedRecord.id),
+        ]);
+
+        // Transition to results view on Visual tab
+        setCurrentAnalysis(null);
+        setIsUploadMode(false);
+        setActiveTab("visual");
+      } else {
+        const errorMsg = result.error || "Visual analysis was unable to complete.";
+        setVisualAnalysisError(errorMsg);
+
+        setRealAudioRecord((prev) =>
+          prev
+            ? {
+                ...prev,
+                visual_analysis_status: "failed",
+                visual_analysis_error: errorMsg,
+              }
+            : null
+        );
+
+        // Update history item status
+        setHistoryItems((prev) =>
+          prev.map((item) =>
+            item.id === targetRecord.id
+              ? { ...item, visualAnalysisStatus: "failed", visualAnalysisError: errorMsg }
+              : item
+          )
+        );
+      }
+    } catch (err: any) {
+      const msg = err.message || "An unexpected error occurred during visual analysis.";
+      setVisualAnalysisError(msg);
+    } finally {
+      setIsAnalyzingVisual(false);
+    }
+  };
+
+  // 6. Retry Visual Analysis without re-uploading
+  const handleRetryVisual = () => {
+    if (realAudioRecord) {
+      handleAnalyzeVisual(realAudioRecord);
+    }
+  };
+
+  // Auto-start visual analysis when user selects visual tab if pending/unstarted
+  useEffect(() => {
+    if (
+      activeTab === "visual" &&
+      realAudioRecord &&
+      !isAnalyzingVisual &&
+      !realAudioRecord.visual_analysis &&
+      (realAudioRecord.visual_analysis_status === "pending" || !realAudioRecord.visual_analysis_status)
+    ) {
+      handleAnalyzeVisual(realAudioRecord);
+    }
+  }, [activeTab, realAudioRecord?.id, realAudioRecord?.visual_analysis_status]);
+
   // 5. Sample Preset Demo handlers (preserved independently)
   const handleStartDemoAnalysis = (
     file: File | null,
@@ -260,22 +357,12 @@ export const ContentAnalysisPage: React.FC = () => {
       const signedUrl = await contentAnalysisService.getSignedPlaybackUrl(record.file_path);
       setSignedVideoUrl(signedUrl);
 
-      if (record.audio_analysis_status === "completed") {
-        setAudioAnalysisError(null);
-        setIsUploadMode(false);
-        setActiveTab("audio");
-      } else if (record.audio_analysis_status === "failed") {
-        setAudioAnalysisError(record.audio_analysis_error || "Audio analysis failed.");
-        setIsUploadMode(false);
-        setActiveTab("audio");
-      } else if (record.audio_analysis_status === "processing") {
-        setIsUploadMode(false);
-        setActiveTab("audio");
-      } else {
-        // Pending / uploaded
-        setAudioAnalysisError(null);
-        setIsUploadMode(false);
-        setActiveTab("audio");
+      setAudioAnalysisError(record.audio_analysis_error || null);
+      setVisualAnalysisError(record.visual_analysis_error || null);
+      setIsUploadMode(false);
+
+      if (activeTab !== "visual" && activeTab !== "audio") {
+        setActiveTab(record.audio_analysis_status === "completed" ? "audio" : "visual");
       }
     }
   };
@@ -311,7 +398,9 @@ export const ContentAnalysisPage: React.FC = () => {
       id: "visual",
       label: "Visual Analysis",
       icon: Camera,
-      count: currentAnalysis?.visualAnalysis.totalScenes,
+      count: realAudioRecord?.visual_analysis?.scenes?.length
+        ? `${realAudioRecord.visual_analysis.scenes.length}`
+        : currentAnalysis?.visualAnalysis.scenes?.length,
     },
     {
       id: "text",
@@ -571,8 +660,43 @@ export const ContentAnalysisPage: React.FC = () => {
                     />
                   </div>
                 </div>
+              ) : activeTab === "visual" ? (
+                <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+                  {/* Left Column: Player Preview if video URL is available */}
+                  <div className="lg:col-span-4 sticky top-6">
+                    <div className="w-full max-w-sm mx-auto space-y-3">
+                      <VideoPreviewPlayer
+                        ref={playerRef}
+                        src={signedVideoUrl || undefined}
+                        durationSeconds={realAudioRecord.duration_seconds || 30}
+                        aspectRatio="9:16"
+                      />
+                      <div className="rounded-xl border border-card-border bg-card p-3 text-xs text-text-secondary space-y-1">
+                        <p className="font-semibold text-text-primary line-clamp-1">
+                          {realAudioRecord.file_name}
+                        </p>
+                        <p className="text-[11px] text-text-muted font-mono">
+                          Click any scene or transition timestamp to jump to that moment in the video.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Right Column: Visual Analysis Results */}
+                  <div className="lg:col-span-8">
+                    <VisualAnalysis
+                      realData={realAudioRecord.visual_analysis}
+                      status={realAudioRecord.visual_analysis_status}
+                      errorMessage={visualAnalysisError || realAudioRecord.visual_analysis_error}
+                      onRetry={handleRetryVisual}
+                      onAnalyzeVisual={() => handleAnalyzeVisual(realAudioRecord)}
+                      isProcessing={isAnalyzingVisual}
+                      onSeek={handleSeekVideo}
+                    />
+                  </div>
+                </div>
               ) : (
-                /* Non-Audio Tabs for real uploaded Reel */
+                /* Non-Audio & Non-Visual Tabs for real uploaded Reel */
                 <div className="rounded-2xl border border-card-border bg-card p-8 sm:p-12 text-center space-y-4 shadow-card">
                   <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-primary/10 border border-primary/20 text-primary mx-auto">
                     <Sparkles className="h-7 w-7" />
@@ -583,10 +707,10 @@ export const ContentAnalysisPage: React.FC = () => {
                     </h3>
                     <p className="text-xs text-text-secondary leading-relaxed">
                       This analysis module will be connected in subsequent steps.
-                      Real Audio Analysis is currently connected and active for this uploaded Reel.
+                      Real Audio and Visual Analysis are currently connected and active for this uploaded Reel.
                     </p>
                   </div>
-                  <div className="pt-2">
+                  <div className="pt-2 flex items-center justify-center gap-3">
                     <Button
                       variant="primary"
                       size="sm"
@@ -594,6 +718,14 @@ export const ContentAnalysisPage: React.FC = () => {
                       leftIcon={<Volume2 className="h-4 w-4" />}
                     >
                       View Real Audio Analysis
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setActiveTab("visual")}
+                      leftIcon={<Camera className="h-4 w-4" />}
+                    >
+                      View Real Visual Analysis
                     </Button>
                   </div>
                 </div>

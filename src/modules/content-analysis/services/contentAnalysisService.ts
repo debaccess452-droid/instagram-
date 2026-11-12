@@ -361,9 +361,12 @@ class ContentAnalysisService {
   /**
    * Invokes the deployed Supabase Edge Function 'analyze-visual'
    * for the given analysisId using the authenticated session.
+   * Supports asynchronous backend: { success: true, queued: true, analysisId, status: "queued" }.
    */
   public async analyzeVisual(analysisId: string): Promise<{
     success: boolean;
+    queued?: boolean;
+    status?: VisualAnalysisStatus;
     analysisId?: string;
     visual_analysis?: VisualBackendResult;
     error?: string;
@@ -412,6 +415,8 @@ class ContentAnalysisService {
 
       return {
         success: true,
+        queued: Boolean(data?.queued),
+        status: (data?.status as VisualAnalysisStatus) || (data?.queued ? "queued" : "processing"),
         analysisId: data?.analysisId || analysisId,
         visual_analysis: data?.visual_analysis,
       };
@@ -420,6 +425,47 @@ class ContentAnalysisService {
         success: false,
         error: err.message || "Failed to invoke analyze-visual function.",
       };
+    }
+  }
+
+  /**
+   * Polls the user's existing content_analyses record using Supabase.
+   * Selects visual_analysis, visual_analysis_status, and visual_analysis_error,
+   * filtered by current analysisId.
+   */
+  public async pollVisualStatus(analysisId: string): Promise<{
+    visual_analysis: VisualBackendResult | null;
+    visual_analysis_status: VisualAnalysisStatus | null;
+    visual_analysis_error: string | null;
+  } | null> {
+    try {
+      const {
+        data: { session },
+        error: sessionError,
+      } = await supabase.auth.getSession();
+
+      if (sessionError || !session?.user) {
+        return null;
+      }
+
+      const { data, error } = await supabase
+        .from(TABLE_CONTENT_ANALYSES)
+        .select("visual_analysis, visual_analysis_status, visual_analysis_error")
+        .eq("id", analysisId)
+        .eq("user_id", session.user.id)
+        .single();
+
+      if (error || !data) {
+        return null;
+      }
+
+      return {
+        visual_analysis: (data.visual_analysis as VisualBackendResult) || null,
+        visual_analysis_status: (data.visual_analysis_status as VisualAnalysisStatus) || null,
+        visual_analysis_error: (data.visual_analysis_error as string) || null,
+      };
+    } catch {
+      return null;
     }
   }
 

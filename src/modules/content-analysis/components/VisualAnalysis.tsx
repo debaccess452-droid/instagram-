@@ -119,9 +119,9 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
   const [copiedText, setCopiedText] = useState(false);
 
   // =========================================================================
-  // 1. Processing State
+  // 1. Queued State
   // =========================================================================
-  if (isProcessing || status === "processing") {
+  if (status === "queued") {
     return (
       <div className="rounded-2xl border border-primary/30 bg-card p-8 sm:p-12 shadow-card text-center space-y-4">
         <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-primary/10 border border-primary/20 text-primary mx-auto">
@@ -129,7 +129,32 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
         </div>
         <div className="max-w-md mx-auto space-y-2">
           <h3 className="text-lg font-bold text-text-primary">
-            Analyzing Reel Visuals with Gemini AI
+            Waiting for analysis...
+          </h3>
+          <p className="text-xs text-text-secondary leading-relaxed">
+            Your Reel visual analysis job is queued with the secure background processor. Polling for results...
+          </p>
+          <div className="pt-2 text-[11px] font-mono text-text-muted flex items-center justify-center gap-2">
+            <span className="h-2 w-2 rounded-full bg-primary animate-pulse" />
+            <span>Job Queued • Checking every 5 seconds</span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // =========================================================================
+  // 2. Processing State
+  // =========================================================================
+  if (status === "processing" || isProcessing) {
+    return (
+      <div className="rounded-2xl border border-primary/30 bg-card p-8 sm:p-12 shadow-card text-center space-y-4">
+        <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-primary/10 border border-primary/20 text-primary mx-auto">
+          <Loader2 className="h-8 w-8 animate-spin" />
+        </div>
+        <div className="max-w-md mx-auto space-y-2">
+          <h3 className="text-lg font-bold text-text-primary">
+            Analyzing your Reel...
           </h3>
           <p className="text-xs text-text-secondary leading-relaxed">
             Extracting scene breakdown, identifying visible subjects, actions & clothing,
@@ -137,7 +162,7 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
           </p>
           <div className="pt-2 text-[11px] font-mono text-text-muted flex items-center justify-center gap-2">
             <span className="h-2 w-2 rounded-full bg-primary animate-pulse" />
-            <span>Processing at 2 FPS sampling rate via analyze-visual Edge Function • Please keep this page open</span>
+            <span>Processing frames at ~2 FPS in background • Checking every 5 seconds</span>
           </div>
         </div>
       </div>

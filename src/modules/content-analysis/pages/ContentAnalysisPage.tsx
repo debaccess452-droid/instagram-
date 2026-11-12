@@ -23,6 +23,7 @@ import {
   AnalysisHistoryItem,
   ContentAnalysisRecord,
   AudioBackendResult,
+  VisualAnalysisStatus,
 } from "../types/analysis";
 import { contentAnalysisService } from "../services/contentAnalysisService";
 import { useAuth } from "@/hooks/useAuth";
@@ -73,6 +74,14 @@ export const ContentAnalysisPage: React.FC = () => {
   }>({ file: null, duration: 28.5 });
 
   const playerRef = useRef<VideoPreviewPlayerRef>(null);
+  const visualPollingRef = useRef<NodeJS.Timeout | null>(null);
+
+  const stopVisualPolling = () => {
+    if (visualPollingRef.current) {
+      clearInterval(visualPollingRef.current);
+      visualPollingRef.current = null;
+    }
+  };
 
   // 1. Load user records from Supabase on mount and restore active record if page reloaded
   useEffect(() => {
@@ -103,6 +112,12 @@ export const ContentAnalysisPage: React.FC = () => {
             }
             if (matching.visual_analysis_status === "failed") {
               setVisualAnalysisError(matching.visual_analysis_error || "Previous visual analysis failed.");
+            }
+            if (
+              matching.visual_analysis_status === "queued" ||
+              matching.visual_analysis_status === "processing"
+            ) {
+              setIsAnalyzingVisual(true);
             }
             setIsUploadMode(false);
           }
@@ -219,34 +234,69 @@ export const ContentAnalysisPage: React.FC = () => {
     setVisualAnalysisError(null);
     localStorage.setItem(ACTIVE_ANALYSIS_STORAGE_KEY, targetRecord.id);
 
+    // Set initial status to queued in UI
+    setRealAudioRecord((prev) =>
+      prev && prev.id === targetRecord.id
+        ? {
+            ...prev,
+            visual_analysis_status: "queued",
+            visual_analysis_error: null,
+          }
+        : prev
+    );
+
     try {
       const result = await contentAnalysisService.analyzeVisual(targetRecord.id);
 
-      if (result.success && result.visual_analysis) {
-        // Fetch fresh record from database
-        const freshRecord = await contentAnalysisService.fetchAnalysisById(targetRecord.id);
-        const resolvedRecord: ContentAnalysisRecord = freshRecord || {
-          ...targetRecord,
-          visual_analysis: result.visual_analysis,
-          visual_analysis_status: "completed",
-        };
+      if (result.success) {
+        // Backend returns immediately: { success: true, queued: true, analysisId, status: "queued" }
+        const newStatus: VisualAnalysisStatus = result.status || "queued";
 
-        setRealAudioRecord(resolvedRecord);
+        setRealAudioRecord((prev) =>
+          prev && prev.id === targetRecord.id
+            ? {
+                ...prev,
+                visual_analysis_status: newStatus,
+                visual_analysis_error: null,
+              }
+            : prev
+        );
 
         // Ensure signed playback URL is loaded
         if (!signedVideoUrl) {
-          const playbackUrl = await contentAnalysisService.getSignedPlaybackUrl(resolvedRecord.file_path);
+          const playbackUrl = await contentAnalysisService.getSignedPlaybackUrl(targetRecord.file_path);
           if (playbackUrl) {
             setSignedVideoUrl(playbackUrl);
           }
         }
 
-        // Update history items list
-        const updatedHistoryItem = contentAnalysisService.mapRecordToHistoryItem(resolvedRecord);
-        setHistoryItems((prev) => [
-          updatedHistoryItem,
-          ...prev.filter((p) => p.id !== resolvedRecord.id),
-        ]);
+        // Update history item status to queued
+        setHistoryItems((prev) =>
+          prev.map((item) =>
+            item.id === targetRecord.id
+              ? { ...item, visualAnalysisStatus: newStatus, visualAnalysisError: null }
+              : item
+          )
+        );
+
+        // If backend returned completed analysis directly (backward compatibility)
+        if (result.visual_analysis) {
+          const freshRecord = await contentAnalysisService.fetchAnalysisById(targetRecord.id);
+          const resolvedRecord: ContentAnalysisRecord = freshRecord || {
+            ...targetRecord,
+            visual_analysis: result.visual_analysis,
+            visual_analysis_status: "completed",
+          };
+
+          setRealAudioRecord(resolvedRecord);
+          setIsAnalyzingVisual(false);
+
+          const updatedHistoryItem = contentAnalysisService.mapRecordToHistoryItem(resolvedRecord);
+          setHistoryItems((prev) => [
+            updatedHistoryItem,
+            ...prev.filter((p) => p.id !== resolvedRecord.id),
+          ]);
+        }
 
         // Transition to results view on Visual tab
         setCurrentAnalysis(null);
@@ -255,15 +305,16 @@ export const ContentAnalysisPage: React.FC = () => {
       } else {
         const errorMsg = result.error || "Visual analysis was unable to complete.";
         setVisualAnalysisError(errorMsg);
+        setIsAnalyzingVisual(false);
 
         setRealAudioRecord((prev) =>
-          prev
+          prev && prev.id === targetRecord.id
             ? {
                 ...prev,
                 visual_analysis_status: "failed",
                 visual_analysis_error: errorMsg,
               }
-            : null
+            : prev
         );
 
         // Update history item status
@@ -278,8 +329,17 @@ export const ContentAnalysisPage: React.FC = () => {
     } catch (err: any) {
       const msg = err.message || "An unexpected error occurred during visual analysis.";
       setVisualAnalysisError(msg);
-    } finally {
       setIsAnalyzingVisual(false);
+
+      setRealAudioRecord((prev) =>
+        prev && prev.id === targetRecord.id
+          ? {
+              ...prev,
+              visual_analysis_status: "failed",
+              visual_analysis_error: msg,
+            }
+          : prev
+      );
     }
   };
 
@@ -289,6 +349,94 @@ export const ContentAnalysisPage: React.FC = () => {
       handleAnalyzeVisual(realAudioRecord);
     }
   };
+
+  // 7. Poll visual analysis from Supabase every 5 seconds when queued or processing
+  useEffect(() => {
+    const currentRecordId = realAudioRecord?.id;
+    const currentStatus = realAudioRecord?.visual_analysis_status;
+
+    // Stop polling if completed or failed or no record
+    if (!currentRecordId || currentStatus === "completed" || currentStatus === "failed") {
+      stopVisualPolling();
+      return;
+    }
+
+    // Start polling if queued, processing, or isAnalyzingVisual
+    if (currentStatus === "queued" || currentStatus === "processing" || isAnalyzingVisual) {
+      stopVisualPolling();
+
+      const poll = async () => {
+        try {
+          const statusData = await contentAnalysisService.pollVisualStatus(currentRecordId);
+          if (!statusData) return;
+
+          if (statusData.visual_analysis_status === "completed") {
+            stopVisualPolling();
+            setIsAnalyzingVisual(false);
+            setVisualAnalysisError(null);
+
+            const freshRecord = await contentAnalysisService.fetchAnalysisById(currentRecordId);
+            if (freshRecord) {
+              setRealAudioRecord(freshRecord);
+              const updatedHistoryItem = contentAnalysisService.mapRecordToHistoryItem(freshRecord);
+              setHistoryItems((prev) => [
+                updatedHistoryItem,
+                ...prev.filter((p) => p.id !== freshRecord.id),
+              ]);
+            }
+          } else if (statusData.visual_analysis_status === "failed") {
+            stopVisualPolling();
+            setIsAnalyzingVisual(false);
+            const errorMsg = statusData.visual_analysis_error || "Visual analysis was unable to complete.";
+            setVisualAnalysisError(errorMsg);
+
+            setRealAudioRecord((prev) =>
+              prev && prev.id === currentRecordId
+                ? {
+                    ...prev,
+                    visual_analysis_status: "failed",
+                    visual_analysis_error: errorMsg,
+                  }
+                : prev
+            );
+
+            setHistoryItems((prev) =>
+              prev.map((item) =>
+                item.id === currentRecordId
+                  ? { ...item, visualAnalysisStatus: "failed", visualAnalysisError: errorMsg }
+                  : item
+              )
+            );
+          } else if (
+            statusData.visual_analysis_status === "queued" ||
+            statusData.visual_analysis_status === "processing"
+          ) {
+            setRealAudioRecord((prev) =>
+              prev && prev.id === currentRecordId && prev.visual_analysis_status !== statusData.visual_analysis_status
+                ? {
+                    ...prev,
+                    visual_analysis_status: statusData.visual_analysis_status,
+                  }
+                : prev
+            );
+          }
+        } catch (err) {
+          console.warn("[ContentAnalysisPage] Visual polling tick error:", err);
+        }
+      };
+
+      // Initial check then poll every 5 seconds
+      visualPollingRef.current = setInterval(poll, 5000);
+
+      return () => {
+        stopVisualPolling();
+      };
+    }
+
+    return () => {
+      stopVisualPolling();
+    };
+  }, [realAudioRecord?.id, realAudioRecord?.visual_analysis_status, isAnalyzingVisual]);
 
   // Auto-start visual analysis when user selects visual tab if pending/unstarted
   useEffect(() => {

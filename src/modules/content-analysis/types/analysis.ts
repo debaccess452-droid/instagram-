@@ -331,7 +331,7 @@ export interface AudioBackendResult {
 /**
  * Status of the visual analysis pipeline in Supabase
  */
-export type VisualAnalysisStatus = "pending" | "processing" | "completed" | "failed";
+export type VisualAnalysisStatus = "queued" | "pending" | "processing" | "completed" | "failed";
 
 export interface VisualBackendSceneSubject {
   subject_label: string;

@@ -544,7 +544,6 @@ export const ContentAnalysisPage: React.FC = () => {
                       <VideoPreviewPlayer
                         ref={playerRef}
                         src={signedVideoUrl || undefined}
-                        poster="https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=600&auto=format&fit=crop&q=80"
                         durationSeconds={realAudioRecord.duration_seconds || 30}
                         aspectRatio="9:16"
                       />

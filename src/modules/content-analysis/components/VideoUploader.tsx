@@ -397,10 +397,7 @@ export const VideoUploader: React.FC<VideoUploaderProps> = ({
                 <div className="w-full max-w-sm">
                   <VideoPreviewPlayer
                     src={videoUrl || undefined}
-                    poster={
-                      activePreset?.previewThumbnail ||
-                      "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=600&auto=format&fit=crop&q=80"
-                    }
+                    poster={activePreset?.previewThumbnail}
                     durationSeconds={videoDuration}
                     aspectRatio="9:16"
                   />

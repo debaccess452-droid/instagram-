@@ -688,21 +688,21 @@ export const OriginalScriptTable: React.FC<OriginalScriptTableProps> = ({
           )}
 
           {/* Main 4-Column Real Backend Script Table */}
-          <div className="rounded-xl border border-card-border bg-card overflow-hidden shadow-card">
-            <div className="overflow-x-auto">
-              <table className="w-full text-left border-collapse min-w-[780px] text-xs sm:text-sm">
+          <div className="w-full rounded-xl border border-card-border bg-card overflow-hidden shadow-card">
+            <div className="w-full overflow-x-auto">
+              <table className="w-full text-left border-collapse min-w-[980px] text-xs sm:text-sm">
                 <thead>
                   <tr className="border-b border-card-border bg-background-elevated text-text-muted uppercase text-[10px] tracking-wider font-semibold">
-                    <th scope="col" className="py-3 px-4 w-32 sm:w-36">
+                    <th scope="col" className="py-3 px-4 w-28 sm:w-32 whitespace-nowrap">
                       Time
                     </th>
-                    <th scope="col" className="py-3 px-4 w-[28%]">
+                    <th scope="col" className="py-3 px-4 w-[28%] min-w-[260px]">
                       Original Voiceover / Audio
                     </th>
-                    <th scope="col" className="py-3 px-4 w-[26%]">
+                    <th scope="col" className="py-3 px-4 w-[24%] min-w-[230px]">
                       Exact On-Screen Text
                     </th>
-                    <th scope="col" className="py-3 px-4 w-[36%]">
+                    <th scope="col" className="py-3 px-4 w-[38%] min-w-[350px]">
                       Detailed Visual Direction
                     </th>
                   </tr>

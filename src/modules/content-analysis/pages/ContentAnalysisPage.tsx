@@ -2020,59 +2020,36 @@ export const ContentAnalysisPage: React.FC = () => {
                   </div>
                 </div>
               ) : activeTab === "script" ? (
-                <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-                  {/* Left Column: Player Preview if video URL is available */}
-                  <div className="lg:col-span-4 sticky top-6">
-                    <div className="w-full max-w-sm mx-auto space-y-3">
-                      <VideoPreviewPlayer
-                        ref={playerRef}
-                        src={signedVideoUrl || undefined}
-                        durationSeconds={realAudioRecord.duration_seconds || 30}
-                        aspectRatio="9:16"
-                      />
-                      <div className="rounded-xl border border-card-border bg-card p-3 text-xs text-text-secondary space-y-1">
-                        <p className="font-semibold text-text-primary line-clamp-1">
-                          {realAudioRecord.file_name}
-                        </p>
-                        <p className="text-[11px] text-text-muted font-mono">
-                          Click any timestamp in the Original Reel Script table to jump to that moment in the video.
-                        </p>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Right Column: Original Reel Script Results */}
-                  <div className="lg:col-span-8">
-                    <OriginalScriptTable
-                      isRealMode={true}
-                      realData={realAudioRecord.original_script}
-                      status={realAudioRecord.original_script_status}
-                      errorMessage={
-                        normalizeVisualStatus(realAudioRecord.original_script_status) ===
-                        "completed"
-                          ? null
-                          : originalScriptError || realAudioRecord.original_script_error
-                      }
-                      errorCode={originalScriptErrorCode}
-                      sourceStatuses={{
-                        audio: realAudioRecord.audio_analysis_status,
-                        visual: realAudioRecord.visual_analysis_status,
-                        text: realAudioRecord.text_extraction_status,
-                      }}
-                      incompleteSourcesError={originalScriptIncompleteSources}
-                      sourceMetadata={{
-                        audio: realAudioRecord.audio_analysis?.analysis_metadata,
-                        visual: realAudioRecord.visual_analysis?.analysis_metadata,
-                        text: realAudioRecord.text_extraction?.analysis_metadata,
-                      }}
-                      videoTitle={realAudioRecord.file_name}
-                      onGenerateScript={() => handleGenerateOriginalScript(realAudioRecord)}
-                      onRetry={handleRetryOriginalScript}
-                      isProcessing={isGeneratingScript}
-                      onSeek={handleSeekVideo}
-                      onSelectTab={setActiveTab}
-                    />
-                  </div>
+                <div className="w-full">
+                  <OriginalScriptTable
+                    isRealMode={true}
+                    realData={realAudioRecord.original_script}
+                    status={realAudioRecord.original_script_status}
+                    errorMessage={
+                      normalizeVisualStatus(realAudioRecord.original_script_status) ===
+                      "completed"
+                        ? null
+                        : originalScriptError || realAudioRecord.original_script_error
+                    }
+                    errorCode={originalScriptErrorCode}
+                    sourceStatuses={{
+                      audio: realAudioRecord.audio_analysis_status,
+                      visual: realAudioRecord.visual_analysis_status,
+                      text: realAudioRecord.text_extraction_status,
+                    }}
+                    incompleteSourcesError={originalScriptIncompleteSources}
+                    sourceMetadata={{
+                      audio: realAudioRecord.audio_analysis?.analysis_metadata,
+                      visual: realAudioRecord.visual_analysis?.analysis_metadata,
+                      text: realAudioRecord.text_extraction?.analysis_metadata,
+                    }}
+                    videoTitle={realAudioRecord.file_name}
+                    onGenerateScript={() => handleGenerateOriginalScript(realAudioRecord)}
+                    onRetry={handleRetryOriginalScript}
+                    isProcessing={isGeneratingScript}
+                    onSeek={handleSeekVideo}
+                    onSelectTab={setActiveTab}
+                  />
                 </div>
               ) : (
                 /* Other Tabs for real uploaded Reel */

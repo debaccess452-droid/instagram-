@@ -28,6 +28,7 @@ import {
   OriginalScriptStatus,
   OriginalScriptSourceStatuses,
   FramePathItem,
+  VisualSamplingMetadata,
 } from "../types/analysis";
 import { contentAnalysisService } from "../services/contentAnalysisService";
 import { supabase } from "@/lib/supabase";
@@ -106,8 +107,7 @@ export const ContentAnalysisPage: React.FC = () => {
   const [submittedVisualFrames, setSubmittedVisualFrames] = useState<{
     recordId: string;
     frames: FramePathItem[];
-    samplingLimitReached: boolean;
-    samplingWarning: string | null;
+    samplingMetadata: VisualSamplingMetadata;
   } | null>(null);
   const [isExtractingText, setIsExtractingText] = useState<boolean>(false);
   const [isPreparingTextFrames, setIsPreparingTextFrames] = useState<boolean>(false);
@@ -620,8 +620,18 @@ export const ContentAnalysisPage: React.FC = () => {
         setSubmittedVisualFrames({
           recordId: targetRecord.id,
           frames: framePaths,
-          samplingLimitReached: extractionResult.samplingLimitReached,
-          samplingWarning: extractionResult.warning,
+          samplingMetadata: {
+            actualDurationSeconds: extractionResult.actualDurationSeconds,
+            firstTimestampSeconds: extractionResult.firstTimestampSeconds,
+            lastTimestampSeconds: extractionResult.lastTimestampSeconds,
+            openingFrameCovered: extractionResult.openingFrameCovered,
+            endFrameCovered: extractionResult.endFrameCovered,
+            samplingLimitReached: extractionResult.samplingLimitReached,
+            samplingWarning: extractionResult.samplingLimitReached
+              ? "Reached the 30-frame processing limit; reserved opening and final endpoint frames, then prioritized the strongest detected visual changes and remaining temporal coverage."
+              : null,
+            endpointWarning: extractionResult.endpointWarning,
+          },
         });
 
         setPreparingVisualFramesState(false);
@@ -2038,9 +2048,15 @@ export const ContentAnalysisPage: React.FC = () => {
                       }
                       samplingWarning={
                         submittedVisualFrames?.recordId === realAudioRecord.id
-                          ? submittedVisualFrames.samplingWarning
+                          ? submittedVisualFrames.samplingMetadata.samplingWarning
                           : null
                       }
+                      samplingMetadata={
+                        submittedVisualFrames?.recordId === realAudioRecord.id
+                          ? submittedVisualFrames.samplingMetadata
+                          : null
+                      }
+                      videoDurationSeconds={realAudioRecord.duration_seconds}
                       onSeek={handleSeekVideo}
                     />
                   </div>

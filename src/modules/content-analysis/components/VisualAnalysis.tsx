@@ -26,6 +26,7 @@ import {
   VisualBackendResult,
   VisualAnalysisStatus,
   FramePathItem,
+  VisualSamplingMetadata,
 } from "../types/analysis";
 import { Button } from "@/components/buttons";
 import { cn } from "@/utils/cn";
@@ -43,6 +44,8 @@ export interface VisualAnalysisProps {
   progressStepMessage?: string | null;
   submittedFrames?: FramePathItem[];
   samplingWarning?: string | null;
+  samplingMetadata?: VisualSamplingMetadata | null;
+  videoDurationSeconds?: number | null;
 }
 
 /**
@@ -118,6 +121,8 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
   progressStepMessage,
   submittedFrames = [],
   samplingWarning = null,
+  samplingMetadata = null,
+  videoDurationSeconds = null,
 }) => {
   const [copiedSceneId, setCopiedSceneId] = useState<string | number | null>(null);
   const [copiedAll, setCopiedAll] = useState(false);
@@ -234,6 +239,64 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
                 {submittedFrames.length} adaptive representative{" "}
                 {submittedFrames.length === 1 ? "frame" : "frames"} uploaded & submitted
               </p>
+              {samplingMetadata && (
+                <div className="flex flex-wrap items-center justify-center gap-1.5 text-[10px] font-mono text-text-muted">
+                  {samplingMetadata.actualDurationSeconds !== null && (
+                    <span className="rounded bg-background-elevated px-2 py-0.5 border border-card-border">
+                      Duration: {samplingMetadata.actualDurationSeconds.toFixed(2)}s
+                    </span>
+                  )}
+                  {samplingMetadata.firstTimestampSeconds !== null && (
+                    <span className="rounded bg-background-elevated px-2 py-0.5 border border-card-border">
+                      First: {samplingMetadata.firstTimestampSeconds.toFixed(2)}s
+                    </span>
+                  )}
+                  {samplingMetadata.lastTimestampSeconds !== null && (
+                    <span className="rounded bg-background-elevated px-2 py-0.5 border border-card-border">
+                      Last: {samplingMetadata.lastTimestampSeconds.toFixed(2)}s
+                    </span>
+                  )}
+                  {samplingMetadata.openingFrameCovered !== null && (
+                    <span
+                      className={cn(
+                        "rounded px-2 py-0.5 border",
+                        samplingMetadata.openingFrameCovered
+                          ? "bg-success/10 text-success border-success/25"
+                          : "bg-warning/10 text-warning border-warning/25"
+                      )}
+                    >
+                      Start: {samplingMetadata.openingFrameCovered ? "Covered" : "Missed"}
+                    </span>
+                  )}
+                  {samplingMetadata.endFrameCovered !== null && (
+                    <span
+                      className={cn(
+                        "rounded px-2 py-0.5 border",
+                        samplingMetadata.endFrameCovered
+                          ? "bg-success/10 text-success border-success/25"
+                          : "bg-warning/10 text-warning border-warning/25"
+                      )}
+                    >
+                      End: {samplingMetadata.endFrameCovered ? "Covered" : "Failed"}
+                    </span>
+                  )}
+                  <span
+                    className={cn(
+                      "rounded px-2 py-0.5 border",
+                      samplingMetadata.samplingLimitReached
+                        ? "bg-warning/10 text-warning border-warning/25"
+                        : "bg-background-elevated border-card-border"
+                    )}
+                  >
+                    30-Frame Limit: {samplingMetadata.samplingLimitReached ? "Reached" : "Within limit"}
+                  </span>
+                </div>
+              )}
+              {samplingMetadata?.endpointWarning && (
+                <p className="text-[11px] text-warning bg-warning/10 border border-warning/25 rounded-md px-3 py-1.5 text-left">
+                  {samplingMetadata.endpointWarning}
+                </p>
+              )}
               {samplingWarning && (
                 <p className="text-[11px] text-warning bg-warning/10 border border-warning/25 rounded-md px-3 py-1.5 text-left">
                   {samplingWarning}
@@ -448,12 +511,70 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
         ? metadata.frames_submitted
         : 0;
 
-    const resolvedSamplingWarning =
-      samplingWarning ||
-      metadata.sampling_warning ||
-      (metadata.sampling_limit_reached || resolvedFrameCount >= 30
-        ? "Reached the 30-frame safety ceiling; prioritized the most visually distinct moments. Some rapid cuts or intermediate visual moments may not be sampled."
+    const resolvedActualDuration =
+      typeof metadata.actual_video_duration_seconds === "number" &&
+      metadata.actual_video_duration_seconds > 0
+        ? metadata.actual_video_duration_seconds
+        : typeof samplingMetadata?.actualDurationSeconds === "number" &&
+          samplingMetadata.actualDurationSeconds > 0
+        ? samplingMetadata.actualDurationSeconds
+        : typeof videoDurationSeconds === "number" && videoDurationSeconds > 0
+        ? videoDurationSeconds
+        : null;
+
+    const resolvedFirstTimestamp =
+      resolvedSubmittedFrames.length > 0
+        ? resolvedSubmittedFrames[0].timestamp_seconds
+        : typeof metadata.first_selected_timestamp_seconds === "number"
+        ? metadata.first_selected_timestamp_seconds
+        : samplingMetadata?.firstTimestampSeconds ?? null;
+
+    const resolvedLastTimestamp =
+      resolvedSubmittedFrames.length > 0
+        ? resolvedSubmittedFrames[resolvedSubmittedFrames.length - 1].timestamp_seconds
+        : typeof metadata.last_selected_timestamp_seconds === "number"
+        ? metadata.last_selected_timestamp_seconds
+        : samplingMetadata?.lastTimestampSeconds ?? null;
+
+    const resolvedOpeningCovered =
+      typeof metadata.opening_frame_covered === "boolean"
+        ? metadata.opening_frame_covered
+        : samplingMetadata?.openingFrameCovered ?? null;
+
+    const resolvedEndCovered =
+      typeof metadata.end_frame_covered === "boolean"
+        ? metadata.end_frame_covered
+        : samplingMetadata?.endFrameCovered ?? null;
+
+    const resolvedLimitReached = Boolean(
+      metadata.sampling_limit_reached ??
+        samplingMetadata?.samplingLimitReached ??
+        resolvedFrameCount >= 30
+    );
+
+    const resolvedEndpointWarning =
+      metadata.endpoint_warning ||
+      samplingMetadata?.endpointWarning ||
+      (resolvedEndCovered === false
+        ? "Final endpoint frame could not be extracted due to video seeking or encoding failure. The closing portion of this Reel may not be covered."
+        : resolvedOpeningCovered === false
+        ? "Opening endpoint frame near 0.00s could not be extracted due to video seeking or encoding failure."
         : null);
+
+    const resolvedSamplingWarning = resolvedLimitReached
+      ? metadata.sampling_warning ||
+        samplingMetadata?.samplingWarning ||
+        samplingWarning ||
+        "Reached the 30-frame safety ceiling; reserved opening and final endpoint frames, then prioritized the strongest detected visual changes and remaining temporal coverage."
+      : null;
+
+    const showCoverageTelemetry =
+      resolvedActualDuration !== null ||
+      resolvedFirstTimestamp !== null ||
+      resolvedLastTimestamp !== null ||
+      resolvedOpeningCovered !== null ||
+      resolvedEndCovered !== null ||
+      resolvedFrameCount > 0;
 
     return (
       <div className="space-y-6">
@@ -484,7 +605,12 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
                 {resolvedFrameCount} {resolvedFrameCount === 1 ? "Frame" : "Frames"} Selected
               </span>
             )}
-            {resolvedSamplingWarning && (
+            {resolvedEndCovered === false && (
+              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-warning/15 text-warning border border-warning/30 font-semibold">
+                Final Frame Missing
+              </span>
+            )}
+            {resolvedLimitReached && (
               <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-warning/15 text-warning border border-warning/30 font-semibold">
                 30-Frame Ceiling Reached
               </span>
@@ -812,8 +938,8 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
           </div>
 
           {/* Submitted Frames & Timestamps */}
-          {(resolvedFrameCount > 0 || resolvedSubmittedFrames.length > 0) && (
-            <div className="rounded-lg bg-background-elevated/70 p-3.5 border border-card-border space-y-2">
+          {(resolvedFrameCount > 0 || resolvedSubmittedFrames.length > 0 || showCoverageTelemetry) && (
+            <div className="rounded-lg bg-background-elevated/70 p-3.5 border border-card-border space-y-2.5">
               <div className="flex items-center justify-between gap-2 flex-wrap">
                 <span className="text-[10px] font-semibold text-text-muted uppercase tracking-wider">
                   Adaptively Selected Frames ({resolvedFrameCount} selected · max 30 safety ceiling)
@@ -822,6 +948,79 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
                   Click any timestamp to seek video
                 </span>
               </div>
+
+              {showCoverageTelemetry && (
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 pt-0.5 text-[11px]">
+                  <div className="rounded bg-card px-2.5 py-1.5 border border-card-border">
+                    <span className="text-[10px] text-text-muted block">Actual Duration</span>
+                    <span className="font-mono font-semibold text-text-primary">
+                      {resolvedActualDuration !== null ? `${resolvedActualDuration.toFixed(2)}s` : "—"}
+                    </span>
+                  </div>
+                  <div className="rounded bg-card px-2.5 py-1.5 border border-card-border">
+                    <span className="text-[10px] text-text-muted block">First Timestamp</span>
+                    <span className="font-mono font-semibold text-text-primary">
+                      {resolvedFirstTimestamp !== null ? `${resolvedFirstTimestamp.toFixed(2)}s` : "—"}
+                    </span>
+                  </div>
+                  <div className="rounded bg-card px-2.5 py-1.5 border border-card-border">
+                    <span className="text-[10px] text-text-muted block">Last Timestamp</span>
+                    <span className="font-mono font-semibold text-text-primary">
+                      {resolvedLastTimestamp !== null ? `${resolvedLastTimestamp.toFixed(2)}s` : "—"}
+                    </span>
+                  </div>
+                  <div className="rounded bg-card px-2.5 py-1.5 border border-card-border">
+                    <span className="text-[10px] text-text-muted block">Opening Frame</span>
+                    <span
+                      className={cn(
+                        "font-mono font-semibold",
+                        resolvedOpeningCovered === true
+                          ? "text-success"
+                          : resolvedOpeningCovered === false
+                          ? "text-warning"
+                          : "text-text-secondary"
+                      )}
+                    >
+                      {resolvedOpeningCovered === true
+                        ? "Covered"
+                        : resolvedOpeningCovered === false
+                        ? "Failed / Missing"
+                        : "Recorded on extraction"}
+                    </span>
+                  </div>
+                  <div className="rounded bg-card px-2.5 py-1.5 border border-card-border">
+                    <span className="text-[10px] text-text-muted block">Final Frame</span>
+                    <span
+                      className={cn(
+                        "font-mono font-semibold",
+                        resolvedEndCovered === true
+                          ? "text-success"
+                          : resolvedEndCovered === false
+                          ? "text-warning"
+                          : "text-text-secondary"
+                      )}
+                    >
+                      {resolvedEndCovered === true
+                        ? "Covered"
+                        : resolvedEndCovered === false
+                        ? "Failed / Missing"
+                        : "Recorded on extraction"}
+                    </span>
+                  </div>
+                  <div className="rounded bg-card px-2.5 py-1.5 border border-card-border">
+                    <span className="text-[10px] text-text-muted block">30-Frame Limit</span>
+                    <span
+                      className={cn(
+                        "font-mono font-semibold",
+                        resolvedLimitReached ? "text-warning" : "text-text-primary"
+                      )}
+                    >
+                      {resolvedLimitReached ? "Reached" : "Within limit"}
+                    </span>
+                  </div>
+                </div>
+              )}
+
               {resolvedSubmittedFrames.length > 0 ? (
                 <div className="flex flex-wrap gap-1.5">
                   {resolvedSubmittedFrames.map((frame, idx) => (
@@ -839,12 +1038,28 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
                     </button>
                   ))}
                 </div>
-              ) : (
+              ) : resolvedFrameCount > 0 ? (
                 <p className="text-xs text-text-secondary">
                   {resolvedFrameCount} adaptive representative{" "}
                   {resolvedFrameCount === 1 ? "frame was" : "frames were"} selected and submitted for visual fallback coverage.
                 </p>
-              )}
+              ) : null}
+            </div>
+          )}
+
+          {resolvedEndpointWarning && (
+            <div className="rounded-lg bg-warning/10 border border-warning/30 p-3.5 text-xs text-text-primary flex items-start gap-2.5">
+              <AlertTriangle className="h-4 w-4 text-warning shrink-0 mt-0.5" />
+              <div className="space-y-0.5">
+                <span className="font-semibold text-warning block">
+                  {resolvedEndCovered === false
+                    ? "Final Frame Coverage Incomplete"
+                    : "Endpoint Frame Coverage Warning"}
+                </span>
+                <p className="text-text-secondary leading-relaxed">
+                  {resolvedEndpointWarning}
+                </p>
+              </div>
             </div>
           )}
 

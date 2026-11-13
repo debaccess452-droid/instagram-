@@ -411,8 +411,25 @@ export interface VisualBackendMetadata {
   frame_timestamps?: number[];
   sampling_limit_reached?: boolean;
   sampling_warning?: string;
+  endpoint_warning?: string;
+  actual_video_duration_seconds?: number;
+  first_selected_timestamp_seconds?: number;
+  last_selected_timestamp_seconds?: number;
+  opening_frame_covered?: boolean;
+  end_frame_covered?: boolean;
   is_demo_data?: boolean;
   analyzed_at?: string;
+}
+
+export interface VisualSamplingMetadata {
+  actualDurationSeconds: number | null;
+  firstTimestampSeconds: number | null;
+  lastTimestampSeconds: number | null;
+  openingFrameCovered: boolean | null;
+  endFrameCovered: boolean | null;
+  samplingLimitReached: boolean;
+  samplingWarning: string | null;
+  endpointWarning: string | null;
 }
 
 export interface VisualBackendOverview {

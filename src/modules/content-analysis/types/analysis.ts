@@ -402,6 +402,13 @@ export interface VisualBackendMetadata {
   frame_sampling_fps?: number;
   model?: string;
   source?: string;
+  provider?: string;
+  fallback_used?: boolean;
+  frame_count?: number;
+  frames_submitted?: number;
+  submitted_frames?: FramePathItem[];
+  frame_paths?: FramePathItem[];
+  frame_timestamps?: number[];
   is_demo_data?: boolean;
   analyzed_at?: string;
 }

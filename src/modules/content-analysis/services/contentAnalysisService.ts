@@ -724,9 +724,470 @@ class ContentAnalysisService {
   }
 
   /**
-   * Uploads extracted JPEG frames to private visual-analysis-frames bucket
-   * using exact path format: {userId}/{analysisId}/frame-{index}.jpg
-   * Verifies every upload succeeds before returning framePaths manifest.
+   * Computes normalized mean absolute RGB difference (0..1) between two 32x32 RGBA buffers.
+   */
+  private computeFrameSignatureDiff(a: Uint8ClampedArray, b: Uint8ClampedArray): number {
+    const len = Math.min(a.length, b.length);
+    if (len === 0) return 1;
+    let totalDiff = 0;
+    let pixelCount = 0;
+    for (let i = 0; i < len; i += 4) {
+      totalDiff +=
+        Math.abs(a[i] - b[i]) +
+        Math.abs(a[i + 1] - b[i + 1]) +
+        Math.abs(a[i + 2] - b[i + 2]);
+      pixelCount++;
+    }
+    return pixelCount > 0 ? totalDiff / (pixelCount * 3 * 255) : 1;
+  }
+
+  /**
+   * Computes average pixel brightness (0..255) for a small RGBA signature buffer.
+   */
+  private computeFrameBrightness(a: Uint8ClampedArray): number {
+    if (a.length === 0) return 128;
+    let total = 0;
+    let pixelCount = 0;
+    for (let i = 0; i < a.length; i += 4) {
+      total += 0.299 * a[i] + 0.587 * a[i + 1] + 0.114 * a[i + 2];
+      pixelCount++;
+    }
+    return pixelCount > 0 ? total / pixelCount : 128;
+  }
+
+  /**
+   * Extracts up to 8 representative JPEG frames for Visual Analysis across the entire video duration.
+   * Prioritizes visually significant scene changes across evenly distributed time windows,
+   * avoids duplicate/near-identical frames, preserves chronological order,
+   * resizes to max 960px, encodes JPEG ~0.72 quality (< 2 MB),
+   * and continues with remaining valid frames if individual frames fail.
+   */
+  public async extractVisualAnalysisFrames(
+    videoBlob: Blob,
+    fallbackDurationSeconds?: number | null
+  ): Promise<Array<{ blob: Blob; timestamp_seconds: number }>> {
+    if (!videoBlob || videoBlob.size === 0) {
+      throw new Error("Downloaded Reel video file is empty or unreadable.");
+    }
+
+    const objectUrl = URL.createObjectURL(videoBlob);
+    const video = document.createElement("video");
+    video.preload = "auto";
+    video.muted = true;
+    video.playsInline = true;
+
+    try {
+      // 1. Wait for video metadata and first decodable frame with 25s timeout
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          cleanupListeners();
+          reject(new Error("Timed out loading Reel video metadata for visual frame extraction."));
+        }, 25000);
+
+        const onReady = () => {
+          if (video.readyState >= 2 || video.videoWidth > 0) {
+            cleanupListeners();
+            clearTimeout(timer);
+            resolve();
+          }
+        };
+
+        const onMetadataOnly = () => {
+          if (video.readyState >= 2) {
+            onReady();
+          }
+        };
+
+        const onError = () => {
+          cleanupListeners();
+          clearTimeout(timer);
+          reject(new Error("Unable to decode Reel video bitstream in browser for frame extraction."));
+        };
+
+        const cleanupListeners = () => {
+          video.removeEventListener("loadedmetadata", onMetadataOnly);
+          video.removeEventListener("loadeddata", onReady);
+          video.removeEventListener("canplay", onReady);
+          video.removeEventListener("error", onError);
+        };
+
+        video.addEventListener("loadedmetadata", onMetadataOnly);
+        video.addEventListener("loadeddata", onReady);
+        video.addEventListener("canplay", onReady);
+        video.addEventListener("error", onError);
+        video.src = objectUrl;
+        video.load();
+      });
+
+      // Resolve WebM Infinity duration quirk if needed
+      let rawDuration = video.duration;
+      if (!Number.isFinite(rawDuration) || rawDuration <= 0) {
+        await new Promise<void>((resolve) => {
+          const fallbackTimer = setTimeout(() => {
+            video.removeEventListener("timeupdate", onTimeUpdate);
+            resolve();
+          }, 2500);
+          const onTimeUpdate = () => {
+            video.removeEventListener("timeupdate", onTimeUpdate);
+            clearTimeout(fallbackTimer);
+            resolve();
+          };
+          video.addEventListener("timeupdate", onTimeUpdate);
+          try {
+            video.currentTime = 1e101;
+          } catch {
+            clearTimeout(fallbackTimer);
+            resolve();
+          }
+        });
+        rawDuration = video.duration;
+      }
+
+      const safeDuration =
+        Number.isFinite(rawDuration) && rawDuration > 0
+          ? rawDuration
+          : fallbackDurationSeconds &&
+            Number.isFinite(fallbackDurationSeconds) &&
+            fallbackDurationSeconds > 0
+          ? fallbackDurationSeconds
+          : 0;
+
+      if (safeDuration <= 0) {
+        throw new Error("Could not determine video duration for visual frame extraction.");
+      }
+
+      const seekToTimestamp = async (targetTime: number): Promise<void> => {
+        if (Math.abs(video.currentTime - targetTime) < 0.005 && video.readyState >= 2) {
+          return;
+        }
+
+        await new Promise<void>((resolve, reject) => {
+          const seekTimer = setTimeout(() => {
+            cleanupSeek();
+            reject(
+              new Error(`Timed out seeking Reel video to ${targetTime}s during frame scan.`)
+            );
+          }, 12000);
+
+          const onSeeked = () => {
+            cleanupSeek();
+            clearTimeout(seekTimer);
+            resolve();
+          };
+
+          const onSeekError = () => {
+            cleanupSeek();
+            clearTimeout(seekTimer);
+            reject(
+              new Error(`Browser video seek failed at ${targetTime}s during frame scan.`)
+            );
+          };
+
+          const cleanupSeek = () => {
+            video.removeEventListener("seeked", onSeeked);
+            video.removeEventListener("error", onSeekError);
+          };
+
+          video.addEventListener("seeked", onSeeked);
+          video.addEventListener("error", onSeekError);
+          video.currentTime = targetTime;
+        });
+      };
+
+      const encodeCurrentFrame = async (
+        fallbackTimestamp: number
+      ): Promise<{
+        blob: Blob;
+        timestamp_seconds: number;
+        signature: Uint8ClampedArray;
+      } | null> => {
+        await new Promise<void>((resolve) => {
+          if (typeof requestAnimationFrame === "function") {
+            requestAnimationFrame(() => resolve());
+          } else {
+            setTimeout(resolve, 25);
+          }
+        });
+
+        const origW = video.videoWidth;
+        const origH = video.videoHeight;
+        if (!origW || !origH) return null;
+
+        // Compact 32x32 signature for duplicate & scene-change detection
+        const sigCanvas = document.createElement("canvas");
+        sigCanvas.width = 32;
+        sigCanvas.height = 32;
+        let signature: Uint8ClampedArray;
+        try {
+          const sigCtx = sigCanvas.getContext("2d");
+          if (!sigCtx) return null;
+          sigCtx.drawImage(video, 0, 0, 32, 32);
+          signature = new Uint8ClampedArray(sigCtx.getImageData(0, 0, 32, 32).data);
+        } finally {
+          sigCanvas.width = 0;
+          sigCanvas.height = 0;
+        }
+
+        // Resize proportionally so longest dimension <= 960px
+        const maxDim = 960;
+        let targetW = origW;
+        let targetH = origH;
+        if (origW > maxDim || origH > maxDim) {
+          if (origW >= origH) {
+            targetW = maxDim;
+            targetH = Math.max(1, Math.round((origH * maxDim) / origW));
+          } else {
+            targetH = maxDim;
+            targetW = Math.max(1, Math.round((origW * maxDim) / origH));
+          }
+        }
+
+        const canvas = document.createElement("canvas");
+        canvas.width = targetW;
+        canvas.height = targetH;
+
+        try {
+          const ctx = canvas.getContext("2d");
+          if (!ctx) return null;
+          ctx.drawImage(video, 0, 0, targetW, targetH);
+
+          let quality = 0.72;
+          let frameBlob = await new Promise<Blob | null>((res) =>
+            canvas.toBlob(res, "image/jpeg", quality)
+          );
+
+          // Ensure each JPEG stays strictly under 2 MB
+          while (
+            frameBlob &&
+            frameBlob.size >= 2 * 1024 * 1024 &&
+            quality > 0.25
+          ) {
+            quality = Number((quality - 0.12).toFixed(2));
+            frameBlob = await new Promise<Blob | null>((res) =>
+              canvas.toBlob(res, "image/jpeg", quality)
+            );
+          }
+
+          if (!frameBlob || frameBlob.size === 0 || frameBlob.size >= 2 * 1024 * 1024) {
+            return null;
+          }
+
+          const rawCaptured =
+            video.currentTime > 0 ? video.currentTime : fallbackTimestamp;
+          const timestamp_seconds = Number(
+            Math.max(0, Math.min(rawCaptured, safeDuration)).toFixed(2)
+          );
+
+          return {
+            blob: frameBlob,
+            timestamp_seconds,
+            signature,
+          };
+        } finally {
+          canvas.width = 0;
+          canvas.height = 0;
+        }
+      };
+
+      const seekAndCapture = async (desiredTimestamp: number) => {
+        let target = desiredTimestamp;
+        try {
+          await seekToTimestamp(target);
+        } catch {
+          const fallbackOffset = Math.max(0, Number((target - 0.2).toFixed(2)));
+          if (fallbackOffset !== target) {
+            target = fallbackOffset;
+            await seekToTimestamp(target);
+          } else {
+            return null;
+          }
+        }
+        return encodeCurrentFrame(target);
+      };
+
+      // 2. Build evenly distributed time windows across the full video duration (up to 8)
+      const MAX_FRAMES = 8;
+      const windowProbes: number[][] = [];
+
+      if (safeDuration <= 0.15) {
+        windowProbes.push([Number((safeDuration * 0.5).toFixed(2))]);
+      } else if (safeDuration < 1.2) {
+        const count = Math.max(2, Math.min(MAX_FRAMES, Math.floor(safeDuration / 0.15)));
+        const minBound = 0.03;
+        const maxBound = Math.max(minBound, safeDuration - 0.03);
+        const span = maxBound - minBound;
+        for (let i = 0; i < count; i++) {
+          const t = Number(
+            (minBound + (count === 1 ? 0.5 * span : (i / (count - 1)) * span)).toFixed(2)
+          );
+          windowProbes.push([t]);
+        }
+      } else {
+        const minBound = Math.max(0.05, Number((safeDuration * 0.03).toFixed(2)));
+        const maxBound = Math.min(
+          safeDuration - 0.05,
+          Number((safeDuration * 0.97).toFixed(2))
+        );
+        const totalSpan = Math.max(0.5, maxBound - minBound);
+        const windowSize = totalSpan / MAX_FRAMES;
+
+        for (let w = 0; w < MAX_FRAMES; w++) {
+          const wStart = minBound + w * windowSize;
+          if (w === 0) {
+            windowProbes.push([
+              Number((wStart + windowSize * 0.18).toFixed(2)),
+              Number((wStart + windowSize * 0.65).toFixed(2)),
+            ]);
+          } else if (w === MAX_FRAMES - 1) {
+            windowProbes.push([
+              Number((wStart + windowSize * 0.3).toFixed(2)),
+              Number((wStart + windowSize * 0.82).toFixed(2)),
+            ]);
+          } else {
+            windowProbes.push([
+              Number((wStart + windowSize * 0.25).toFixed(2)),
+              Number((wStart + windowSize * 0.75).toFixed(2)),
+            ]);
+          }
+        }
+      }
+
+      const acceptedFrames: Array<{
+        blob: Blob;
+        timestamp_seconds: number;
+        signature: Uint8ClampedArray;
+      }> = [];
+
+      const DUPLICATE_THRESHOLD = 0.01; // ~1% mean RGB difference threshold
+
+      // 3. Evaluate each chronological window, prioritizing scene changes & avoiding duplicates
+      for (let w = 0; w < windowProbes.length; w++) {
+        const probes = windowProbes[w];
+        const candidates: Array<{
+          blob: Blob;
+          timestamp_seconds: number;
+          signature: Uint8ClampedArray;
+        }> = [];
+
+        for (const t of probes) {
+          const lastAcceptedTs =
+            acceptedFrames.length > 0
+              ? acceptedFrames[acceptedFrames.length - 1].timestamp_seconds
+              : -1;
+          if (lastAcceptedTs >= 0 && t <= lastAcceptedTs + 0.04) {
+            continue;
+          }
+
+          try {
+            const captured = await seekAndCapture(t);
+            if (captured) {
+              if (lastAcceptedTs < 0 || captured.timestamp_seconds > lastAcceptedTs + 0.03) {
+                candidates.push(captured);
+              }
+            }
+          } catch (frameErr) {
+            console.warn(
+              `[ContentAnalysisService] Skipping visual probe at ${t}s due to extraction error:`,
+              frameErr
+            );
+          }
+        }
+
+        if (candidates.length === 0) {
+          continue;
+        }
+
+        let chosen = candidates[0];
+
+        if (acceptedFrames.length === 0) {
+          // For initial window, avoid picking a near-black fade-in if second probe has clear content
+          if (candidates.length > 1) {
+            const b0 = this.computeFrameBrightness(candidates[0].signature);
+            const b1 = this.computeFrameBrightness(candidates[1].signature);
+            if (b0 < 14 && b1 >= 18) {
+              chosen = candidates[1];
+            }
+          }
+        } else {
+          // Pick candidate within this window with the strongest visual change from the previous frame
+          const prevSig = acceptedFrames[acceptedFrames.length - 1].signature;
+          let bestDiff = this.computeFrameSignatureDiff(prevSig, candidates[0].signature);
+          for (let c = 1; c < candidates.length; c++) {
+            const diff = this.computeFrameSignatureDiff(prevSig, candidates[c].signature);
+            if (diff > bestDiff) {
+              bestDiff = diff;
+              chosen = candidates[c];
+            }
+          }
+
+          // Skip near-duplicate / identical frames compared to any already selected frame
+          let minDiffToAccepted = 1;
+          for (const existing of acceptedFrames) {
+            const d = this.computeFrameSignatureDiff(existing.signature, chosen.signature);
+            if (d < minDiffToAccepted) {
+              minDiffToAccepted = d;
+            }
+          }
+
+          if (minDiffToAccepted < DUPLICATE_THRESHOLD) {
+            continue;
+          }
+        }
+
+        acceptedFrames.push(chosen);
+        if (acceptedFrames.length >= MAX_FRAMES) {
+          break;
+        }
+      }
+
+      // Guarantee at least 1 valid frame on edge-case videos if window loop produced none
+      if (acceptedFrames.length === 0) {
+        try {
+          const midTarget = Number((safeDuration * 0.5).toFixed(2));
+          const fallback = await seekAndCapture(midTarget);
+          if (fallback) {
+            acceptedFrames.push(fallback);
+          }
+        } catch {
+          // Handled below
+        }
+      }
+
+      if (acceptedFrames.length === 0) {
+        throw new Error(
+          "No valid representative video frames could be extracted from your Reel."
+        );
+      }
+
+      return acceptedFrames
+        .sort((a, b) => a.timestamp_seconds - b.timestamp_seconds)
+        .slice(0, MAX_FRAMES)
+        .map(({ blob, timestamp_seconds }) => ({ blob, timestamp_seconds }));
+    } finally {
+      URL.revokeObjectURL(objectUrl);
+      video.pause();
+      video.removeAttribute("src");
+      video.load();
+    }
+  }
+
+  /**
+   * Cleans up uploaded visual analysis frame files from private storage if workflow fails
+   * before the backend accepts the request.
+   */
+  public async cleanupUploadedFrames(paths: string[]): Promise<void> {
+    if (!Array.isArray(paths) || paths.length === 0) return;
+    try {
+      await supabase.storage.from(VISUAL_FRAMES_BUCKET).remove(paths);
+    } catch (err) {
+      console.warn("[ContentAnalysisService] Visual frame cleanup warning:", err);
+    }
+  }
+
+  /**
+   * Uploads up to 8 extracted JPEG frames to private visual-analysis-frames bucket
+   * using exact 1-indexed path format: {userId}/{analysisId}/frame-{index}.jpg (1..8).
+   * Continues with remaining valid frames if an individual frame fails, and throws if none succeed.
    */
   public async uploadAnalysisFrames(
     userId: string,
@@ -741,15 +1202,18 @@ class ContentAnalysisService {
       throw new Error("No extracted frames available to upload.");
     }
 
+    const framesToUpload = frames.slice(0, 8);
     const framePaths: FramePathItem[] = [];
 
-    for (let i = 0; i < frames.length; i++) {
-      const frame = frames[i];
+    for (let i = 0; i < framesToUpload.length; i++) {
+      const frame = framesToUpload[i];
       if (!frame?.blob || frame.blob.size === 0) {
-        throw new Error(`Extracted frame ${i + 1} is empty and cannot be uploaded.`);
+        console.warn(`[ContentAnalysisService] Skipping empty extracted frame at index ${i + 1}.`);
+        continue;
       }
 
-      const storagePath = `${userId}/${analysisId}/frame-${i}.jpg`;
+      const frameIndex = framePaths.length + 1; // 1 through 8
+      const storagePath = `${userId}/${analysisId}/frame-${frameIndex}.jpg`;
 
       const { data, error } = await supabase.storage
         .from(VISUAL_FRAMES_BUCKET)
@@ -759,9 +1223,12 @@ class ContentAnalysisService {
         });
 
       if (error || !data?.path) {
-        throw new Error(
-          `Failed to upload visual frame ${i + 1} to private storage: ${error?.message || "Upload did not return a path"}`
+        console.warn(
+          `[ContentAnalysisService] Failed to upload visual frame ${frameIndex}: ${
+            error?.message || "Upload did not return a path"
+          }`
         );
+        continue;
       }
 
       framePaths.push({
@@ -770,8 +1237,10 @@ class ContentAnalysisService {
       });
     }
 
-    if (framePaths.length !== frames.length) {
-      throw new Error("Not all extracted visual frames were uploaded successfully.");
+    if (framePaths.length === 0) {
+      throw new Error(
+        "Failed to upload any representative visual frames to private storage. Visual analysis was not started."
+      );
     }
 
     return framePaths;
@@ -806,11 +1275,22 @@ class ContentAnalysisService {
         };
       }
 
-      if (
-        !Array.isArray(framePaths) ||
-        framePaths.length === 0 ||
-        framePaths.some((fp) => !fp?.path || typeof fp.timestamp_seconds !== "number" || !Number.isFinite(fp.timestamp_seconds))
-      ) {
+      const validFrames = Array.isArray(framePaths)
+        ? framePaths
+            .slice(0, 8)
+            .filter(
+              (fp) =>
+                Boolean(fp?.path) &&
+                !fp.path.startsWith("data:") &&
+                !fp.path.startsWith("blob:") &&
+                !fp.path.startsWith("http") &&
+                typeof fp.timestamp_seconds === "number" &&
+                Number.isFinite(fp.timestamp_seconds) &&
+                fp.timestamp_seconds >= 0
+            )
+        : [];
+
+      if (validFrames.length === 0) {
         return {
           success: false,
           error:
@@ -821,7 +1301,7 @@ class ContentAnalysisService {
       const { data, error } = await supabase.functions.invoke("analyze-visual", {
         body: {
           analysisId,
-          framePaths,
+          framePaths: validFrames,
         },
       });
 

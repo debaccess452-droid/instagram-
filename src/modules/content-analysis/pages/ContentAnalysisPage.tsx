@@ -27,6 +27,7 @@ import {
   TextExtractionStatus,
   OriginalScriptStatus,
   OriginalScriptSourceStatuses,
+  FramePathItem,
 } from "../types/analysis";
 import { contentAnalysisService } from "../services/contentAnalysisService";
 import { supabase } from "@/lib/supabase";
@@ -102,6 +103,10 @@ export const ContentAnalysisPage: React.FC = () => {
   const [isPreparingVisualFrames, setIsPreparingVisualFrames] = useState<boolean>(false);
   const [visualAnalysisError, setVisualAnalysisError] = useState<string | null>(null);
   const [visualProgressMessage, setVisualProgressMessage] = useState<string | null>(null);
+  const [submittedVisualFrames, setSubmittedVisualFrames] = useState<{
+    recordId: string;
+    frames: FramePathItem[];
+  } | null>(null);
   const [isExtractingText, setIsExtractingText] = useState<boolean>(false);
   const [isPreparingTextFrames, setIsPreparingTextFrames] = useState<boolean>(false);
   const [textExtractionError, setTextExtractionError] = useState<string | null>(null);
@@ -208,6 +213,7 @@ export const ContentAnalysisPage: React.FC = () => {
       setIsAnalyzingVisual(false);
       setVisualProgressMessage(null);
       setVisualAnalysisError(record.visual_analysis_error || "Previous visual analysis failed.");
+      setSubmittedVisualFrames((prev) => (prev?.recordId === record.id ? null : prev));
     } else {
       stopVisualPolling();
       activeVisualRunIdRef.current = null;
@@ -215,6 +221,7 @@ export const ContentAnalysisPage: React.FC = () => {
       setIsAnalyzingVisual(false);
       setVisualProgressMessage(null);
       setVisualAnalysisError(null);
+      setSubmittedVisualFrames((prev) => (prev?.recordId === record.id ? null : prev));
     }
 
     const tStatus = normalizeVisualStatus(record.text_extraction_status);
@@ -366,6 +373,7 @@ export const ContentAnalysisPage: React.FC = () => {
     setIsExtractingText(false);
     setIsGeneratingScript(false);
     setVisualProgressMessage(null);
+    setSubmittedVisualFrames(null);
     setTextProgressMessage(null);
     setRealAudioRecord(record);
     setAudioAnalysisError(null);
@@ -488,12 +496,15 @@ export const ContentAnalysisPage: React.FC = () => {
     setPreparingVisualFramesState(true);
     setVisualAnalysisError(null);
     setVisualProgressMessage("Preparing your Reel...");
+    setSubmittedVisualFrames((prev) => (prev?.recordId === targetRecord.id ? null : prev));
     localStorage.setItem(ACTIVE_ANALYSIS_STORAGE_KEY, targetRecord.id);
 
     // Ensure Visual tab is visible while preparation runs
     setCurrentAnalysis(null);
     setIsUploadMode(false);
     setActiveTab("visual");
+
+    let uploadedPathsForCleanup: string[] = [];
 
     try {
       // 1. Get authenticated user ID
@@ -541,9 +552,9 @@ export const ContentAnalysisPage: React.FC = () => {
       // Abort safely if user switched to a different Reel while downloading
       if (activeVisualRunIdRef.current !== targetRecord.id) return;
 
-      // 4. Extract up to 3 representative JPEG frames (at ~10%, ~50%, ~90% of duration)
-      setVisualProgressMessage("Extracting representative frames...");
-      const extractedFrames = await contentAnalysisService.extractRepresentativeFrames(
+      // 4. Extract up to 8 representative JPEG frames across the full Reel duration
+      setVisualProgressMessage("Extracting up to 8 representative frames...");
+      const extractedFrames = await contentAnalysisService.extractVisualAnalysisFrames(
         videoBlob,
         authoritativeDuration
       );
@@ -556,30 +567,45 @@ export const ContentAnalysisPage: React.FC = () => {
 
       if (activeVisualRunIdRef.current !== targetRecord.id) return;
 
-      // 5. Upload frames to private visual-analysis-frames bucket ({userId}/{analysisId}/frame-{i}.jpg)
-      setVisualProgressMessage("Uploading visual frames...");
+      // 5. Upload frames to private visual-analysis-frames bucket ({userId}/{analysisId}/frame-1..8.jpg)
+      setVisualProgressMessage(`Uploading ${extractedFrames.length} visual frames...`);
       const framePaths = await contentAnalysisService.uploadAnalysisFrames(
         userId,
         targetRecord.id,
         extractedFrames
       );
 
-      if (!framePaths || framePaths.length !== extractedFrames.length || framePaths.length === 0) {
+      if (!framePaths || framePaths.length === 0) {
         throw new Error(
           "Visual frame upload verification failed. Visual analysis was not started."
         );
       }
 
-      if (activeVisualRunIdRef.current !== targetRecord.id) return;
+      uploadedPathsForCleanup = framePaths.map((fp) => fp.path);
+
+      if (activeVisualRunIdRef.current !== targetRecord.id) {
+        await contentAnalysisService.cleanupUploadedFrames(uploadedPathsForCleanup);
+        uploadedPathsForCleanup = [];
+        return;
+      }
 
       // 6. Invoke analyze-visual reusing existing analysisId and validated framePaths manifest
-      setVisualProgressMessage("Starting visual analysis...");
+      setVisualProgressMessage(`Starting visual analysis (${framePaths.length} frames)...`);
       const result = await contentAnalysisService.analyzeVisual(targetRecord.id, framePaths);
 
-      if (activeVisualRunIdRef.current !== targetRecord.id) return;
+      if (activeVisualRunIdRef.current !== targetRecord.id) {
+        if (!result.success && uploadedPathsForCleanup.length > 0) {
+          await contentAnalysisService.cleanupUploadedFrames(uploadedPathsForCleanup);
+          uploadedPathsForCleanup = [];
+        }
+        return;
+      }
 
       if (result.success) {
-        // Frame preparation & upload succeeded and job is queued
+        // Backend accepted the request; keep uploaded frames in storage for worker/Groq fallback
+        uploadedPathsForCleanup = [];
+        setSubmittedVisualFrames({ recordId: targetRecord.id, frames: framePaths });
+
         setPreparingVisualFramesState(false);
         setVisualProgressMessage(null);
         const newStatus: VisualAnalysisStatus = result.status || "queued";
@@ -634,6 +660,12 @@ export const ContentAnalysisPage: React.FC = () => {
           ]);
         }
       } else {
+        if (uploadedPathsForCleanup.length > 0) {
+          await contentAnalysisService.cleanupUploadedFrames(uploadedPathsForCleanup);
+          uploadedPathsForCleanup = [];
+        }
+        setSubmittedVisualFrames((prev) => (prev?.recordId === targetRecord.id ? null : prev));
+
         const errorMsg = result.error || "Visual analysis was unable to complete.";
         activeVisualRunIdRef.current = null;
         setPreparingVisualFramesState(false);
@@ -661,7 +693,12 @@ export const ContentAnalysisPage: React.FC = () => {
         );
       }
     } catch (err: any) {
+      if (uploadedPathsForCleanup.length > 0) {
+        await contentAnalysisService.cleanupUploadedFrames(uploadedPathsForCleanup);
+        uploadedPathsForCleanup = [];
+      }
       if (activeVisualRunIdRef.current !== targetRecord.id) return;
+      setSubmittedVisualFrames((prev) => (prev?.recordId === targetRecord.id ? null : prev));
       const msg = err.message || "An unexpected error occurred during visual analysis.";
       activeVisualRunIdRef.current = null;
       setPreparingVisualFramesState(false);
@@ -1649,6 +1686,7 @@ export const ContentAnalysisPage: React.FC = () => {
       setOriginalScriptIncompleteSources(null);
       setRealAudioRecord(null);
       setSignedVideoUrl(null);
+      setSubmittedVisualFrames(null);
       localStorage.removeItem(ACTIVE_ANALYSIS_STORAGE_KEY);
       setIsUploadMode(true);
     }
@@ -1975,6 +2013,11 @@ export const ContentAnalysisPage: React.FC = () => {
                       onAnalyzeVisual={() => handleAnalyzeVisual(realAudioRecord)}
                       isProcessing={isAnalyzingVisual}
                       progressStepMessage={visualProgressMessage}
+                      submittedFrames={
+                        submittedVisualFrames?.recordId === realAudioRecord.id
+                          ? submittedVisualFrames.frames
+                          : []
+                      }
                       onSeek={handleSeekVideo}
                     />
                   </div>

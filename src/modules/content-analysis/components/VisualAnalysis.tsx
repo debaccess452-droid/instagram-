@@ -27,6 +27,7 @@ import {
   VisualScene,
   VisualBackendResult,
   VisualAnalysisStatus,
+  FramePathItem,
 } from "../types/analysis";
 import { Button } from "@/components/buttons";
 import { cn } from "@/utils/cn";
@@ -42,6 +43,7 @@ export interface VisualAnalysisProps {
   onAnalyzeVisual?: () => void;
   isProcessing?: boolean;
   progressStepMessage?: string | null;
+  submittedFrames?: FramePathItem[];
 }
 
 /**
@@ -115,6 +117,7 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
   onAnalyzeVisual,
   isProcessing = false,
   progressStepMessage,
+  submittedFrames = [],
 }) => {
   const [copiedSceneId, setCopiedSceneId] = useState<string | number | null>(null);
   const [copiedAll, setCopiedAll] = useState(false);
@@ -181,6 +184,24 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
             <span className="h-2 w-2 rounded-full bg-primary animate-pulse" />
             <span>{activeFooterLabel}</span>
           </div>
+          {!progressStepMessage && submittedFrames.length > 0 && (
+            <div className="pt-3 mt-2 border-t border-card-border/60 space-y-2">
+              <p className="text-[11px] font-semibold text-text-secondary">
+                {submittedFrames.length} representative{" "}
+                {submittedFrames.length === 1 ? "frame" : "frames"} submitted for fallback readiness
+              </p>
+              <div className="flex flex-wrap items-center justify-center gap-1.5">
+                {submittedFrames.map((f, idx) => (
+                  <span
+                    key={`${f.path}-${idx}`}
+                    className="rounded bg-background-elevated px-2 py-0.5 font-mono text-[10px] text-text-muted border border-card-border"
+                  >
+                    #{idx + 1} · {formatSecondsToTimestamp(f.timestamp_seconds)}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       </div>
     );
@@ -236,7 +257,8 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
           </h3>
           <p className="text-xs text-text-secondary leading-relaxed">
             Your Reel is stored in private Supabase Storage. Run the Visual Analysis pipeline
-            to observe scenes, camera framing, subject actions, environments, lighting, transitions, and on-screen text.
+            (Gemini primary full-video analysis, with up to 8 representative frames extracted for Groq fallback readiness)
+            to observe scenes, camera framing, subject actions, lighting, transitions, and on-screen text.
           </p>
         </div>
         {onAnalyzeVisual && (
@@ -350,23 +372,79 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
       }
     };
 
+    const providerIdentityText = [metadata.provider, metadata.source, metadata.model]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+    const isGroqFallbackResult =
+      Boolean(metadata.fallback_used) ||
+      providerIdentityText.includes("groq") ||
+      providerIdentityText.includes("qwen") ||
+      providerIdentityText.includes("fallback");
+
+    const backendFrameItems: FramePathItem[] = Array.isArray(metadata.submitted_frames)
+      ? metadata.submitted_frames
+      : Array.isArray(metadata.frame_paths)
+      ? metadata.frame_paths
+      : Array.isArray(metadata.frame_timestamps)
+      ? metadata.frame_timestamps
+          .filter((ts) => typeof ts === "number" && Number.isFinite(ts))
+          .map((ts, i) => ({
+            path: `frame-${i + 1}.jpg`,
+            timestamp_seconds: ts,
+          }))
+      : [];
+
+    const resolvedSubmittedFrames = (
+      backendFrameItems.length > 0 ? backendFrameItems : submittedFrames || []
+    )
+      .slice()
+      .sort((a, b) => a.timestamp_seconds - b.timestamp_seconds);
+
+    const resolvedFrameCount =
+      resolvedSubmittedFrames.length > 0
+        ? resolvedSubmittedFrames.length
+        : typeof metadata.frame_count === "number" && metadata.frame_count > 0
+        ? metadata.frame_count
+        : typeof metadata.frames_submitted === "number" && metadata.frames_submitted > 0
+        ? metadata.frames_submitted
+        : 0;
+
     return (
       <div className="space-y-6">
         {/* Real Backend Evidence Banner */}
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2.5 rounded-xl bg-primary/10 border border-primary/25 px-4 py-3 text-xs shadow-sm">
           <div className="flex items-center gap-2.5 text-text-secondary">
-            <span className="inline-block h-2.5 w-2.5 rounded-full bg-success" />
+            <span
+              className={cn(
+                "inline-block h-2.5 w-2.5 rounded-full shrink-0",
+                isGroqFallbackResult ? "bg-warning" : "bg-success"
+              )}
+            />
             <span className="font-semibold text-text-primary">
-              Visual analysis completed.
+              {isGroqFallbackResult
+                ? "Fallback visual analysis completed (representative frames only)."
+                : "Visual analysis completed."}
             </span>
             <span className="hidden sm:inline text-text-muted">
-              — Observed directly from your uploaded Reel
+              {isGroqFallbackResult
+                ? "— Groq fallback analyzed submitted representative frames only"
+                : "— Gemini primary full-video observation"}
               {metadata.model ? ` (${metadata.model})` : ""}
             </span>
           </div>
-          <div className="flex items-center gap-2">
-            {typeof metadata.frame_sampling_fps === "number" &&
-            metadata.frame_sampling_fps > 0 ? (
+          <div className="flex items-center gap-2 flex-wrap">
+            {resolvedFrameCount > 0 && (
+              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-background-elevated text-text-secondary border border-card-border font-semibold">
+                {resolvedFrameCount} {resolvedFrameCount === 1 ? "Frame" : "Frames"} Submitted
+              </span>
+            )}
+            {isGroqFallbackResult ? (
+              <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded bg-warning/15 text-warning border border-warning/30 font-semibold">
+                Groq Fallback • Frames Only
+              </span>
+            ) : typeof metadata.frame_sampling_fps === "number" &&
+              metadata.frame_sampling_fps > 0 ? (
               <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded bg-primary/15 text-primary border border-primary/25 font-semibold">
                 Sampled at {metadata.frame_sampling_fps} FPS
               </span>
@@ -853,20 +931,63 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
         {/* =================================================================== */}
         {/* SECTION 7: Analysis Warnings & Methodology Notice                   */}
         {/* =================================================================== */}
-        <div className="rounded-xl border border-card-border bg-card p-5 space-y-3 shadow-card">
+        <div className="rounded-xl border border-card-border bg-card p-5 space-y-4 shadow-card">
           <div className="flex items-center gap-2 text-xs font-semibold text-text-primary">
             <Info className="h-4 w-4 text-primary" />
-            <span>Methodology & Sampling Limitation Note</span>
+            <span>Methodology, Provider Scope & Sampling Limitations</span>
           </div>
 
-          <div className="rounded-lg bg-background-elevated/60 p-3 text-xs leading-relaxed text-text-secondary border border-card-border space-y-1.5">
+          {/* Submitted Frames & Timestamps */}
+          {(resolvedFrameCount > 0 || resolvedSubmittedFrames.length > 0) && (
+            <div className="rounded-lg bg-background-elevated/70 p-3.5 border border-card-border space-y-2">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <span className="text-[10px] font-semibold text-text-muted uppercase tracking-wider">
+                  Submitted Representative Frames ({resolvedFrameCount} of up to 8 max)
+                </span>
+                <span className="text-[11px] font-mono text-text-muted">
+                  Click any timestamp to seek video
+                </span>
+              </div>
+              {resolvedSubmittedFrames.length > 0 ? (
+                <div className="flex flex-wrap gap-1.5">
+                  {resolvedSubmittedFrames.map((frame, idx) => (
+                    <button
+                      key={`${frame.path}-${idx}`}
+                      type="button"
+                      onClick={() => onSeek(frame.timestamp_seconds)}
+                      className="inline-flex items-center gap-1 rounded bg-primary/10 hover:bg-primary/20 text-primary border border-primary/25 px-2 py-0.5 font-mono text-[11px] font-semibold transition-colors cursor-pointer"
+                      title={`Seek to Frame #${idx + 1} (${frame.timestamp_seconds}s)`}
+                    >
+                      <Play className="h-2.5 w-2.5 fill-current" />
+                      <span>
+                        Frame {idx + 1} · {formatSecondsToTimestamp(frame.timestamp_seconds)} ({frame.timestamp_seconds.toFixed(2)}s)
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-xs text-text-secondary">
+                  {resolvedFrameCount} representative{" "}
+                  {resolvedFrameCount === 1 ? "frame was" : "frames were"} submitted for visual fallback coverage.
+                </p>
+              )}
+            </div>
+          )}
+
+          <div className="rounded-lg bg-background-elevated/60 p-3.5 text-xs leading-relaxed text-text-secondary border border-card-border space-y-2">
             <p>
-              <strong className="text-text-primary">Visual Observation Scope: </strong>
-              {typeof metadata.frame_sampling_fps === "number" &&
-              metadata.frame_sampling_fps > 0
-                ? `Visual analysis sampled the video at ${metadata.frame_sampling_fps} FPS. `
-                : "Visual analysis evaluated your uploaded Reel with representative frame extraction ready for multimodal fallback. "}
-              Very brief sub-second cuts or rapid micro-motions between observed frames may not be captured.
+              <strong className="text-text-primary">Provider Scope: </strong>
+              Gemini remains the primary full-video analysis provider. Groq serves as a fallback provider that analyzes only the submitted representative frames (up to 8 frames) and is never a complete full-video analysis.
+            </p>
+            <p>
+              <strong className="text-text-primary">Sampling Limitation: </strong>
+              {isGroqFallbackResult
+                ? "This result was produced by Groq fallback from the submitted representative frames only. "
+                : typeof metadata.frame_sampling_fps === "number" &&
+                  metadata.frame_sampling_fps > 0
+                ? `Primary visual analysis sampled the video at ${metadata.frame_sampling_fps} FPS. `
+                : ""}
+              Even 8 representative frames cannot guarantee detection of every rapid cut, brief on-screen text, or visual event occurring between sampled timestamps.
             </p>
             <p className="text-[11px] text-text-muted">
               Technical hardware specifications (e.g. camera models, lens focal lengths, physical lighting rigs) are intentionally not inferred to preserve strict empirical observation.

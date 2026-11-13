@@ -58,6 +58,7 @@ export const ContentAnalysisPage: React.FC = () => {
   const [isAnalyzingAudio, setIsAnalyzingAudio] = useState<boolean>(false);
   const [audioAnalysisError, setAudioAnalysisError] = useState<string | null>(null);
   const [isAnalyzingVisual, setIsAnalyzingVisual] = useState<boolean>(false);
+  const [isPreparingVisualFrames, setIsPreparingVisualFrames] = useState<boolean>(false);
   const [visualAnalysisError, setVisualAnalysisError] = useState<string | null>(null);
   const [visualProgressMessage, setVisualProgressMessage] = useState<string | null>(null);
 
@@ -117,7 +118,10 @@ export const ContentAnalysisPage: React.FC = () => {
             }
             if (
               matching.visual_analysis_status === "queued" ||
-              matching.visual_analysis_status === "processing"
+              matching.visual_analysis_status === "processing" ||
+              matching.visual_analysis_status === "groq_processing" ||
+              String(matching.visual_analysis_status || "").toLowerCase().includes("groq") ||
+              String(matching.visual_analysis_status || "").toLowerCase().includes("fallback")
             ) {
               setIsAnalyzingVisual(true);
             }
@@ -138,6 +142,10 @@ export const ContentAnalysisPage: React.FC = () => {
 
   // 2. Upload success callback from VideoUploader
   const handleUploadSuccess = (record: ContentAnalysisRecord) => {
+    stopVisualPolling();
+    setIsPreparingVisualFrames(false);
+    setIsAnalyzingVisual(false);
+    setVisualProgressMessage(null);
     setRealAudioRecord(record);
     setAudioAnalysisError(null);
     setVisualAnalysisError(null);
@@ -230,23 +238,30 @@ export const ContentAnalysisPage: React.FC = () => {
     const targetRecord = recordToAnalyze || realAudioRecord;
     if (!targetRecord) return;
 
-    if (isAnalyzingVisual) return; // Prevent duplicate clicks while running
+    if (isPreparingVisualFrames || isAnalyzingVisual) return; // Prevent duplicate clicks while running
 
+    stopVisualPolling();
     setIsAnalyzingVisual(true);
+    setIsPreparingVisualFrames(true);
     setVisualAnalysisError(null);
-    setVisualProgressMessage("Preparing video frames...");
+    setVisualProgressMessage("Preparing your Reel...");
     localStorage.setItem(ACTIVE_ANALYSIS_STORAGE_KEY, targetRecord.id);
 
-    // Set initial status to queued in UI
+    // Clear any previous error locally without setting status to "queued" until frames are uploaded
     setRealAudioRecord((prev) =>
       prev && prev.id === targetRecord.id
         ? {
             ...prev,
-            visual_analysis_status: "queued",
+            visual_analysis_status: "pending",
             visual_analysis_error: null,
           }
         : prev
     );
+
+    // Ensure Visual tab is visible while preparation runs
+    setCurrentAnalysis(null);
+    setIsUploadMode(false);
+    setActiveTab("visual");
 
     try {
       // 1. Get authenticated user ID
@@ -260,33 +275,61 @@ export const ContentAnalysisPage: React.FC = () => {
         throw new Error("Authentication required: Please sign in to run Visual Analysis.");
       }
 
-      // 2. Download original uploaded Reel from private storage
-      const videoBlob = await contentAnalysisService.downloadReelVideo(targetRecord.file_path);
+      // 2. Retrieve authoritative file_path from content_analyses using analysisId
+      const freshDbRecord = await contentAnalysisService.fetchAnalysisById(targetRecord.id);
+      const authoritativeFilePath = freshDbRecord?.file_path || targetRecord.file_path;
+      const authoritativeDuration =
+        freshDbRecord?.duration_seconds ?? targetRecord.duration_seconds;
 
-      // 3. Extract up to 3 representative JPEG frames (at ~10%, ~50%, ~90% of duration)
-      const extractedFrames = await contentAnalysisService.extractRepresentativeFrames(videoBlob);
+      if (!authoritativeFilePath) {
+        throw new Error("Uploaded Reel storage path could not be found for this analysis record.");
+      }
 
-      // 4. Upload frames to private visual-analysis-frames bucket
-      setVisualProgressMessage("Uploading secure analysis frames...");
+      // 3. Download original uploaded Reel from private reel-uploads bucket
+      const videoBlob = await contentAnalysisService.downloadReelVideo(authoritativeFilePath);
+
+      // 4. Extract up to 3 representative JPEG frames (at ~10%, ~50%, ~90% of duration)
+      setVisualProgressMessage("Extracting representative frames...");
+      const extractedFrames = await contentAnalysisService.extractRepresentativeFrames(
+        videoBlob,
+        authoritativeDuration
+      );
+
+      if (!extractedFrames || extractedFrames.length === 0) {
+        throw new Error(
+          "No representative frames could be extracted from your Reel. Visual analysis was not started."
+        );
+      }
+
+      // 5. Upload frames to private visual-analysis-frames bucket ({userId}/{analysisId}/frame-{i}.jpg)
+      setVisualProgressMessage("Uploading visual frames...");
       const framePaths = await contentAnalysisService.uploadAnalysisFrames(
         userId,
         targetRecord.id,
         extractedFrames
       );
 
-      // 5. Invoke analyze-visual with analysisId and framePaths manifest
+      if (!framePaths || framePaths.length !== extractedFrames.length || framePaths.length === 0) {
+        throw new Error(
+          "Visual frame upload verification failed. Visual analysis was not started."
+        );
+      }
+
+      // 6. Invoke analyze-visual with analysisId and validated framePaths manifest
       setVisualProgressMessage("Starting visual analysis...");
       const result = await contentAnalysisService.analyzeVisual(targetRecord.id, framePaths);
 
       if (result.success) {
-        // Backend returns immediately: { success: true, queued: true, analysisId, status: "queued" }
-        setVisualProgressMessage("Visual analysis queued...");
+        // Frame preparation & upload succeeded and job is queued
+        setIsPreparingVisualFrames(false);
+        setVisualProgressMessage(null);
         const newStatus: VisualAnalysisStatus = result.status || "queued";
 
         setRealAudioRecord((prev) =>
           prev && prev.id === targetRecord.id
             ? {
                 ...prev,
+                file_path: authoritativeFilePath,
                 visual_analysis_status: newStatus,
                 visual_analysis_error: null,
               }
@@ -295,7 +338,9 @@ export const ContentAnalysisPage: React.FC = () => {
 
         // Ensure signed playback URL is loaded
         if (!signedVideoUrl) {
-          const playbackUrl = await contentAnalysisService.getSignedPlaybackUrl(targetRecord.file_path);
+          const playbackUrl = await contentAnalysisService.getSignedPlaybackUrl(
+            authoritativeFilePath
+          );
           if (playbackUrl) {
             setSignedVideoUrl(playbackUrl);
           }
@@ -312,9 +357,10 @@ export const ContentAnalysisPage: React.FC = () => {
 
         // If backend returned completed analysis directly (backward compatibility)
         if (result.visual_analysis) {
-          const freshRecord = await contentAnalysisService.fetchAnalysisById(targetRecord.id);
-          const resolvedRecord: ContentAnalysisRecord = freshRecord || {
+          const completedRecord = await contentAnalysisService.fetchAnalysisById(targetRecord.id);
+          const resolvedRecord: ContentAnalysisRecord = completedRecord || {
             ...targetRecord,
+            file_path: authoritativeFilePath,
             visual_analysis: result.visual_analysis,
             visual_analysis_status: "completed",
           };
@@ -329,13 +375,9 @@ export const ContentAnalysisPage: React.FC = () => {
             ...prev.filter((p) => p.id !== resolvedRecord.id),
           ]);
         }
-
-        // Transition to results view on Visual tab
-        setCurrentAnalysis(null);
-        setIsUploadMode(false);
-        setActiveTab("visual");
       } else {
         const errorMsg = result.error || "Visual analysis was unable to complete.";
+        setIsPreparingVisualFrames(false);
         setVisualAnalysisError(errorMsg);
         setVisualProgressMessage(null);
         setIsAnalyzingVisual(false);
@@ -361,6 +403,7 @@ export const ContentAnalysisPage: React.FC = () => {
       }
     } catch (err: any) {
       const msg = err.message || "An unexpected error occurred during visual analysis.";
+      setIsPreparingVisualFrames(false);
       setVisualAnalysisError(msg);
       setVisualProgressMessage(null);
       setIsAnalyzingVisual(false);
@@ -374,6 +417,14 @@ export const ContentAnalysisPage: React.FC = () => {
             }
           : prev
       );
+
+      setHistoryItems((prev) =>
+        prev.map((item) =>
+          item.id === targetRecord.id
+            ? { ...item, visualAnalysisStatus: "failed", visualAnalysisError: msg }
+            : item
+        )
+      );
     }
   };
 
@@ -384,10 +435,16 @@ export const ContentAnalysisPage: React.FC = () => {
     }
   };
 
-  // 7. Poll visual analysis from Supabase every 5 seconds when queued or processing
+  // 7. Poll visual analysis from Supabase every 5 seconds after analyze-visual queues the job
   useEffect(() => {
     const currentRecordId = realAudioRecord?.id;
     const currentStatus = realAudioRecord?.visual_analysis_status;
+
+    // Never poll while local browser frame extraction/upload is in progress
+    if (isPreparingVisualFrames) {
+      stopVisualPolling();
+      return;
+    }
 
     // Stop polling if completed or failed or no record
     if (!currentRecordId || currentStatus === "completed" || currentStatus === "failed") {
@@ -395,8 +452,15 @@ export const ContentAnalysisPage: React.FC = () => {
       return;
     }
 
-    // Start polling if queued, processing, or isAnalyzingVisual
-    if (currentStatus === "queued" || currentStatus === "processing" || isAnalyzingVisual) {
+    const normalizedStatus = String(currentStatus || "").toLowerCase();
+    const isBackendActiveStatus =
+      normalizedStatus === "queued" ||
+      normalizedStatus === "processing" ||
+      normalizedStatus.includes("groq") ||
+      normalizedStatus.includes("fallback");
+
+    // Start polling only when queued/processing/fallback on backend
+    if (isBackendActiveStatus || isAnalyzingVisual) {
       stopVisualPolling();
 
       const poll = async () => {
@@ -423,7 +487,8 @@ export const ContentAnalysisPage: React.FC = () => {
             stopVisualPolling();
             setIsAnalyzingVisual(false);
             setVisualProgressMessage(null);
-            const errorMsg = statusData.visual_analysis_error || "Visual analysis was unable to complete.";
+            const errorMsg =
+              statusData.visual_analysis_error || "Visual analysis was unable to complete.";
             setVisualAnalysisError(errorMsg);
 
             setRealAudioRecord((prev) =>
@@ -443,12 +508,12 @@ export const ContentAnalysisPage: React.FC = () => {
                   : item
               )
             );
-          } else if (
-            statusData.visual_analysis_status === "queued" ||
-            statusData.visual_analysis_status === "processing"
-          ) {
+          } else if (statusData.visual_analysis_status) {
+            setVisualProgressMessage(null);
             setRealAudioRecord((prev) =>
-              prev && prev.id === currentRecordId && prev.visual_analysis_status !== statusData.visual_analysis_status
+              prev &&
+              prev.id === currentRecordId &&
+              prev.visual_analysis_status !== statusData.visual_analysis_status
                 ? {
                     ...prev,
                     visual_analysis_status: statusData.visual_analysis_status,
@@ -461,7 +526,7 @@ export const ContentAnalysisPage: React.FC = () => {
         }
       };
 
-      // Initial check then poll every 5 seconds
+      // Poll every 5 seconds
       visualPollingRef.current = setInterval(poll, 5000);
 
       return () => {
@@ -472,20 +537,32 @@ export const ContentAnalysisPage: React.FC = () => {
     return () => {
       stopVisualPolling();
     };
-  }, [realAudioRecord?.id, realAudioRecord?.visual_analysis_status, isAnalyzingVisual]);
+  }, [
+    realAudioRecord?.id,
+    realAudioRecord?.visual_analysis_status,
+    isAnalyzingVisual,
+    isPreparingVisualFrames,
+  ]);
 
   // Auto-start visual analysis when user selects visual tab if pending/unstarted
   useEffect(() => {
     if (
       activeTab === "visual" &&
       realAudioRecord &&
+      !isPreparingVisualFrames &&
       !isAnalyzingVisual &&
       !realAudioRecord.visual_analysis &&
       (realAudioRecord.visual_analysis_status === "pending" || !realAudioRecord.visual_analysis_status)
     ) {
       handleAnalyzeVisual(realAudioRecord);
     }
-  }, [activeTab, realAudioRecord?.id, realAudioRecord?.visual_analysis_status]);
+  }, [
+    activeTab,
+    realAudioRecord?.id,
+    realAudioRecord?.visual_analysis_status,
+    isPreparingVisualFrames,
+    isAnalyzingVisual,
+  ]);
 
   // 5. Sample Preset Demo handlers (preserved independently)
   const handleStartDemoAnalysis = (
@@ -518,6 +595,10 @@ export const ContentAnalysisPage: React.FC = () => {
 
   // 6. History Selection handler
   const handleSelectHistoryItem = async (id: string) => {
+    stopVisualPolling();
+    setIsPreparingVisualFrames(false);
+    setVisualProgressMessage(null);
+
     // A. Check if selecting a demo preset
     const presets = contentAnalysisService.getPresetReels();
     const foundPreset = presets.find((p) => p.result.id === id || p.id === id);
@@ -525,6 +606,8 @@ export const ContentAnalysisPage: React.FC = () => {
       setCurrentAnalysis(foundPreset.result);
       setRealAudioRecord(null);
       setSignedVideoUrl(null);
+      setIsAnalyzingVisual(false);
+      setVisualAnalysisError(null);
       setIsUploadMode(false);
       setActiveTab("overview");
       return;
@@ -543,6 +626,14 @@ export const ContentAnalysisPage: React.FC = () => {
 
       setAudioAnalysisError(record.audio_analysis_error || null);
       setVisualAnalysisError(record.visual_analysis_error || null);
+
+      const vStatus = String(record.visual_analysis_status || "").toLowerCase();
+      setIsAnalyzingVisual(
+        vStatus === "queued" ||
+          vStatus === "processing" ||
+          vStatus.includes("groq") ||
+          vStatus.includes("fallback")
+      );
       setIsUploadMode(false);
 
       if (activeTab !== "visual" && activeTab !== "audio") {
@@ -556,6 +647,10 @@ export const ContentAnalysisPage: React.FC = () => {
     await contentAnalysisService.deleteUserAnalysis(id, filePath);
     setHistoryItems((prev) => prev.filter((item) => item.id !== id));
     if (realAudioRecord?.id === id) {
+      stopVisualPolling();
+      setIsPreparingVisualFrames(false);
+      setIsAnalyzingVisual(false);
+      setVisualProgressMessage(null);
       setRealAudioRecord(null);
       setSignedVideoUrl(null);
       localStorage.removeItem(ACTIVE_ANALYSIS_STORAGE_KEY);

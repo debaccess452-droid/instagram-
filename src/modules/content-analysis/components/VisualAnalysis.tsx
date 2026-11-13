@@ -120,35 +120,39 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
   const [copiedAll, setCopiedAll] = useState(false);
   const [copiedText, setCopiedText] = useState(false);
 
-  // =========================================================================
-  // 1. Queued State
-  // =========================================================================
-  if (status === "queued") {
-    return (
-      <div className="rounded-2xl border border-primary/30 bg-card p-8 sm:p-12 shadow-card text-center space-y-4">
-        <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-primary/10 border border-primary/20 text-primary mx-auto">
-          <Loader2 className="h-8 w-8 animate-spin" />
-        </div>
-        <div className="max-w-md mx-auto space-y-2">
-          <h3 className="text-lg font-bold text-text-primary">
-            {progressStepMessage || "Waiting for analysis..."}
-          </h3>
-          <p className="text-xs text-text-secondary leading-relaxed">
-            Your Reel visual analysis job is queued with the secure background processor. Polling for results...
-          </p>
-          <div className="pt-2 text-[11px] font-mono text-text-muted flex items-center justify-center gap-2">
-            <span className="h-2 w-2 rounded-full bg-primary animate-pulse" />
-            <span>Job Queued • Checking every 5 seconds</span>
-          </div>
-        </div>
-      </div>
-    );
-  }
+  const normalizedStatus = String(status || "").toLowerCase();
+  const isGroqFallbackStage =
+    normalizedStatus.includes("groq") || normalizedStatus.includes("fallback");
+  const isBackendActiveStatus =
+    normalizedStatus === "queued" ||
+    normalizedStatus === "processing" ||
+    isGroqFallbackStage;
+  const showActiveProgress =
+    isProcessing ||
+    (isBackendActiveStatus && normalizedStatus !== "failed" && !errorMessage);
 
   // =========================================================================
-  // 2. Processing State
+  // 1. Active Preparation / Queued / Processing / Groq Fallback State
   // =========================================================================
-  if (status === "processing" || isProcessing) {
+  if (showActiveProgress) {
+    const activeHeading =
+      progressStepMessage ||
+      (isGroqFallbackStage
+        ? "Groq fallback is analyzing extracted frames..."
+        : "Gemini is analyzing your Reel...");
+
+    const activeDescription = progressStepMessage
+      ? "Preparing representative video frames from your uploaded Reel before queueing analysis."
+      : isGroqFallbackStage
+      ? "Using the extracted representative frames to analyze visible scenes, subjects, and on-screen details."
+      : "Observing scenes, camera framing, visible subjects, transitions, and on-screen text from your uploaded Reel.";
+
+    const activeFooterLabel = progressStepMessage
+      ? "Preparing visual frames in browser"
+      : isGroqFallbackStage
+      ? "Groq fallback active • Checking status every 5 seconds"
+      : "Background analysis active • Checking status every 5 seconds";
+
     return (
       <div className="rounded-2xl border border-primary/30 bg-card p-8 sm:p-12 shadow-card text-center space-y-4">
         <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-primary/10 border border-primary/20 text-primary mx-auto">
@@ -156,15 +160,14 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
         </div>
         <div className="max-w-md mx-auto space-y-2">
           <h3 className="text-lg font-bold text-text-primary">
-            {progressStepMessage || "Analyzing your Reel..."}
+            {activeHeading}
           </h3>
           <p className="text-xs text-text-secondary leading-relaxed">
-            Extracting scene breakdown, identifying visible subjects, actions & clothing,
-            mapping camera angles & framing, detecting visual transitions, and logging on-screen text.
+            {activeDescription}
           </p>
           <div className="pt-2 text-[11px] font-mono text-text-muted flex items-center justify-center gap-2">
             <span className="h-2 w-2 rounded-full bg-primary animate-pulse" />
-            <span>Processing frames at ~2 FPS in background • Checking every 5 seconds</span>
+            <span>{activeFooterLabel}</span>
           </div>
         </div>
       </div>
@@ -311,18 +314,26 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
         {/* Real Backend Evidence Banner */}
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2.5 rounded-xl bg-primary/10 border border-primary/25 px-4 py-3 text-xs shadow-sm">
           <div className="flex items-center gap-2.5 text-text-secondary">
-            <span className="inline-block h-2.5 w-2.5 rounded-full bg-primary animate-pulse" />
+            <span className="inline-block h-2.5 w-2.5 rounded-full bg-success" />
             <span className="font-semibold text-text-primary">
-              Real Visual Analysis
+              Visual analysis completed.
             </span>
             <span className="hidden sm:inline text-text-muted">
-              — Direct frame observation from uploaded Reel bitstream via Gemini Multimodal
+              — Observed directly from your uploaded Reel
+              {metadata.model ? ` (${metadata.model})` : ""}
             </span>
           </div>
           <div className="flex items-center gap-2">
-            <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded bg-primary/15 text-primary border border-primary/25 font-semibold">
-              Sampled at ~2 FPS
-            </span>
+            {typeof metadata.frame_sampling_fps === "number" &&
+            metadata.frame_sampling_fps > 0 ? (
+              <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded bg-primary/15 text-primary border border-primary/25 font-semibold">
+                Sampled at {metadata.frame_sampling_fps} FPS
+              </span>
+            ) : metadata.model ? (
+              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-primary/15 text-primary border border-primary/25 font-semibold">
+                {metadata.model}
+              </span>
+            ) : null}
             <Button
               variant="secondary"
               size="sm"
@@ -809,10 +820,12 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
 
           <div className="rounded-lg bg-background-elevated/60 p-3 text-xs leading-relaxed text-text-secondary border border-card-border space-y-1.5">
             <p>
-              <strong className="text-text-primary">2 FPS Frame-Sampling Limitation: </strong>
-              Visual analysis sampled the video bitstream at approximately 2 frames per second (2 FPS).
-              Sub-second jump cuts (&lt;0.5s), rapid subliminal flashes, or fine micro-motion between sampled frames
-              may not be captured.
+              <strong className="text-text-primary">Visual Observation Scope: </strong>
+              {typeof metadata.frame_sampling_fps === "number" &&
+              metadata.frame_sampling_fps > 0
+                ? `Visual analysis sampled the video at ${metadata.frame_sampling_fps} FPS. `
+                : "Visual analysis evaluated your uploaded Reel with representative frame extraction ready for multimodal fallback. "}
+              Very brief sub-second cuts or rapid micro-motions between observed frames may not be captured.
             </p>
             <p className="text-[11px] text-text-muted">
               Technical hardware specifications (e.g. camera models, lens focal lengths, physical lighting rigs) are intentionally not inferred to preserve strict empirical observation.

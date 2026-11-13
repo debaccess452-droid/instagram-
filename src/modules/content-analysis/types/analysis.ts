@@ -331,7 +331,14 @@ export interface AudioBackendResult {
 /**
  * Status of the visual analysis pipeline in Supabase
  */
-export type VisualAnalysisStatus = "queued" | "pending" | "processing" | "completed" | "failed";
+export type VisualAnalysisStatus =
+  | "queued"
+  | "pending"
+  | "processing"
+  | "groq_processing"
+  | "completed"
+  | "failed"
+  | (string & {});
 
 export interface FramePathItem {
   path: string;

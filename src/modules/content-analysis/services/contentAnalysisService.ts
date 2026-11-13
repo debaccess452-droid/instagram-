@@ -188,6 +188,29 @@ class ContentAnalysisService {
     return { record: record as ContentAnalysisRecord };
   }
 
+  private normalizeVisualAnalysis(raw: unknown): VisualBackendResult | null {
+    if (!raw) return null;
+    if (typeof raw === "string") {
+      try {
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === "object" ? (parsed as VisualBackendResult) : null;
+      } catch {
+        return null;
+      }
+    }
+    if (typeof raw === "object") {
+      return raw as VisualBackendResult;
+    }
+    return null;
+  }
+
+  private normalizeRecord(row: any): ContentAnalysisRecord {
+    return {
+      ...(row as ContentAnalysisRecord),
+      visual_analysis: this.normalizeVisualAnalysis(row?.visual_analysis),
+    };
+  }
+
   /**
    * Fetches real records from public.content_analyses for the authenticated user,
    * ordered newest first.
@@ -217,7 +240,7 @@ class ContentAnalysisService {
         return [];
       }
 
-      return (data as ContentAnalysisRecord[]) || [];
+      return Array.isArray(data) ? data.map((row) => this.normalizeRecord(row)) : [];
     } catch (err) {
       console.error(
         "[ContentAnalysisService] Exception fetching user content analyses:",
@@ -829,7 +852,7 @@ class ContentAnalysisService {
       }
 
       return {
-        visual_analysis: (data.visual_analysis as VisualBackendResult) || null,
+        visual_analysis: this.normalizeVisualAnalysis(data.visual_analysis),
         visual_analysis_status: (data.visual_analysis_status as VisualAnalysisStatus) || null,
         visual_analysis_error: (data.visual_analysis_error as string) || null,
       };
@@ -865,7 +888,7 @@ class ContentAnalysisService {
         return null;
       }
 
-      return data as ContentAnalysisRecord;
+      return this.normalizeRecord(data);
     } catch (err) {
       console.error("[ContentAnalysisService] Error fetching record by id:", err);
       return null;

@@ -120,38 +120,50 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
   const [copiedAll, setCopiedAll] = useState(false);
   const [copiedText, setCopiedText] = useState(false);
 
-  const normalizedStatus = String(status || "").toLowerCase();
+  const normalizedStatus = String(status || "").trim().toLowerCase();
+  const isCompletedStatus = normalizedStatus === "completed";
+  const isFailedStatus = normalizedStatus === "failed";
+  const isQueuedStatus = normalizedStatus === "queued";
   const isGroqFallbackStage =
     normalizedStatus.includes("groq") || normalizedStatus.includes("fallback");
   const isBackendActiveStatus =
-    normalizedStatus === "queued" ||
+    isQueuedStatus ||
     normalizedStatus === "processing" ||
     isGroqFallbackStage;
-  const showActiveProgress =
-    isProcessing ||
-    (isBackendActiveStatus && normalizedStatus !== "failed" && !errorMessage);
 
-  // =========================================================================
-  // 1. Active Preparation / Queued / Processing / Groq Fallback State
-  // =========================================================================
+  // 1. Completed + saved result MUST render immediately (never restart or show loading/stale error)
+  const shouldRenderCompletedRealData = Boolean(realData) && isCompletedStatus;
+
+  // 2. Active manual start/retry or active backend queued/processing/groq job
+  const showActiveProgress =
+    !shouldRenderCompletedRealData &&
+    ((isProcessing && Boolean(progressStepMessage)) ||
+      (isBackendActiveStatus && !isFailedStatus));
+
   if (showActiveProgress) {
     const activeHeading =
       progressStepMessage ||
       (isGroqFallbackStage
         ? "Groq fallback is analyzing extracted frames..."
+        : isQueuedStatus
+        ? "Visual analysis queued..."
         : "Gemini is analyzing your Reel...");
 
     const activeDescription = progressStepMessage
       ? "Preparing representative video frames from your uploaded Reel before queueing analysis."
       : isGroqFallbackStage
       ? "Using the extracted representative frames to analyze visible scenes, subjects, and on-screen details."
+      : isQueuedStatus
+      ? "Your Reel visual analysis job is queued in the background. Monitoring existing job status..."
       : "Observing scenes, camera framing, visible subjects, transitions, and on-screen text from your uploaded Reel.";
 
     const activeFooterLabel = progressStepMessage
       ? "Preparing visual frames in browser"
       : isGroqFallbackStage
       ? "Groq fallback active • Checking status every 5 seconds"
-      : "Background analysis active • Checking status every 5 seconds";
+      : isQueuedStatus
+      ? "Job queued • Checking status every 5 seconds"
+      : "Processing in background • Checking status every 5 seconds";
 
     return (
       <div className="rounded-2xl border border-primary/30 bg-card p-8 sm:p-12 shadow-card text-center space-y-4">
@@ -174,10 +186,8 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
     );
   }
 
-  // =========================================================================
-  // 2. Failed State with Retry Action
-  // =========================================================================
-  if (status === "failed" || errorMessage) {
+  // 3. Failed State with Retry Action
+  if (!shouldRenderCompletedRealData && (isFailedStatus || (!realData && Boolean(errorMessage)))) {
     return (
       <div className="rounded-2xl border border-error/30 bg-card p-6 sm:p-8 shadow-card space-y-4">
         <div className="flex items-start gap-3.5">
@@ -213,10 +223,8 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
     );
   }
 
-  // =========================================================================
-  // 3. Pending / Not Analyzed State
-  // =========================================================================
-  if (!realData && !data && (status === "pending" || !status)) {
+  // 4. Pending / Not Analyzed State (manual start only — never auto-starts on reopen)
+  if (!realData && !data && (normalizedStatus === "pending" || !normalizedStatus)) {
     return (
       <div className="rounded-2xl border border-card-border bg-card p-8 sm:p-10 shadow-card text-center space-y-4">
         <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-primary/10 border border-primary/20 text-primary mx-auto">
@@ -227,7 +235,7 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
             Ready for Visual Intelligence
           </h3>
           <p className="text-xs text-text-secondary leading-relaxed">
-            Your Reel is stored in private Supabase Storage. Run the Gemini AI Visual Analysis pipeline
+            Your Reel is stored in private Supabase Storage. Run the Visual Analysis pipeline
             to observe scenes, camera framing, subject actions, environments, lighting, transitions, and on-screen text.
           </p>
         </div>
@@ -248,8 +256,41 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
     );
   }
 
+  // 5. Edge case: status is completed in DB but visual_analysis payload is empty
+  if (isCompletedStatus && !realData && !data) {
+    return (
+      <div className="rounded-2xl border border-card-border bg-card p-6 sm:p-8 shadow-card space-y-4">
+        <div className="flex items-start gap-3.5">
+          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-warning/15 text-warning shrink-0 border border-warning/25">
+            <AlertTriangle className="h-5 w-5" />
+          </div>
+          <div className="space-y-1 flex-1">
+            <h3 className="text-base font-bold text-text-primary">
+              Visual Analysis Result Unavailable
+            </h3>
+            <p className="text-xs text-text-secondary leading-relaxed">
+              This analysis record is marked as completed, but no visual analysis payload was saved.
+            </p>
+          </div>
+        </div>
+        {onRetry && (
+          <div className="flex justify-end pt-2 border-t border-card-border/80">
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={onRetry}
+              leftIcon={<RotateCcw className="h-4 w-4" />}
+            >
+              Retry Visual Analysis
+            </Button>
+          </div>
+        )}
+      </div>
+    );
+  }
+
   // =========================================================================
-  // 4. REAL BACKEND DATA RENDERING (VisualBackendResult)
+  // 6. REAL BACKEND DATA RENDERING (VisualBackendResult)
   // =========================================================================
   if (realData) {
     const overview = realData.video_overview;

@@ -369,8 +369,12 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
   // =========================================================================
   if (realData) {
     const overview = realData.video_overview;
-    const scenes = realData.scenes || [];
-    const transitions = realData.transitions || [];
+    const scenes = [...(realData.scenes || [])].sort(
+      (a, b) => (a.start_time_seconds ?? 0) - (b.start_time_seconds ?? 0)
+    );
+    const transitions = [...(realData.transitions || [])].sort(
+      (a, b) => (a.timestamp_seconds ?? 0) - (b.timestamp_seconds ?? 0)
+    );
     const visualElements = realData.visual_elements || {
       readable_text: [],
       logos_and_graphics: [],
@@ -756,7 +760,7 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
                 Observed Camera Angles:
               </span>
               <p className="text-text-primary font-semibold">
-                {observedAngles.length > 0 ? observedAngles.join(", ") : "Eye-level"}
+                {observedAngles.length > 0 ? observedAngles.join(", ") : "Not clearly specified"}
               </p>
               <p className="text-[11px] text-text-muted pt-1">
                 Camera perspective angle relative to the primary subject.
@@ -768,7 +772,9 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
                 Observable Camera Movement:
               </span>
               <p className="text-text-primary font-semibold">
-                {observedMovements.length > 0 ? observedMovements.join(", ") : "Static / Fixed"}
+                {observedMovements.length > 0
+                  ? observedMovements.join(", ")
+                  : "Not clearly specified"}
               </p>
               <p className="text-[11px] text-text-muted pt-1">
                 Camera dynamics observed between consecutive sampled frames.
@@ -886,8 +892,9 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
                 Visible Contrast & Lighting Appearance:
               </span>
               <p className="text-text-primary leading-relaxed">
-                {scenes[0]?.composition?.contrast_and_lighting_appearance ||
-                  "Natural observable lighting consistent across frames."}
+                {scenes.find((s) => s.composition?.contrast_and_lighting_appearance)?.composition
+                  ?.contrast_and_lighting_appearance ||
+                  "Contrast and lighting appearance not separately specified in sampled frames."}
               </p>
             </div>
           </div>

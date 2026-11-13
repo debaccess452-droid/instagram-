@@ -3,8 +3,10 @@ import React, {
   useContext,
   useState,
   useEffect,
+  useRef,
   type ReactNode,
 } from "react";
+import { useNavigate, useLocation } from "react-router-dom";
 import type { User, Session, AuthError } from "@supabase/supabase-js";
 import { supabase } from "@/lib/supabase";
 import type { UserProfile } from "@/types";
@@ -16,6 +18,7 @@ export interface AuthContextValue {
   session: Session | null;
   isAuthenticated: boolean;
   isLoading: boolean;
+  isLoggingOut: boolean;
   signIn: (email: string, password: string) => Promise<{ error: AuthError | Error | null }>;
   signUp: (
     email: string,
@@ -37,6 +40,7 @@ const AuthContext = createContext<AuthContextValue>({
   session: null,
   isAuthenticated: false,
   isLoading: true,
+  isLoggingOut: false,
   signIn: async () => ({ error: null }),
   signUp: async () => ({ error: null, needsEmailConfirmation: false }),
   signOut: async () => ({ error: null }),
@@ -78,45 +82,98 @@ function mapSupabaseUserToProfile(supabaseUser: User | null): UserProfile | null
 }
 
 export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
+  const navigate = useNavigate();
+  const location = useLocation();
   const [user, setUser] = useState<UserProfile | null>(null);
   const [supabaseUser, setSupabaseUser] = useState<User | null>(null);
   const [session, setSession] = useState<Session | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [isLoggingOut, setIsLoggingOut] = useState<boolean>(false);
 
-  // 1. Synchronous Auth State Change Listener
+  const wasAuthenticatedRef = useRef<boolean>(false);
+  const pathnameRef = useRef<string>(location.pathname);
+
   useEffect(() => {
-    // Keep listener purely synchronous: update session and user state immediately
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, currentSession) => {
+    pathnameRef.current = location.pathname;
+  }, [location.pathname]);
+
+  // Reset logout transition flag once navigation settles outside protected routes
+  useEffect(() => {
+    const isOnPublicOrAuthPage =
+      location.pathname === ROUTES.HOME ||
+      location.pathname === ROUTES.LOGIN ||
+      location.pathname === ROUTES.SIGNUP ||
+      location.pathname === ROUTES.WELCOME ||
+      location.pathname === ROUTES.PRICING ||
+      location.pathname === ROUTES.ABOUT ||
+      location.pathname === ROUTES.CONTACT ||
+      location.pathname === ROUTES.FAQ ||
+      location.pathname === ROUTES.PRIVACY ||
+      location.pathname === ROUTES.TERMS;
+
+    if (isLoggingOut && !session && isOnPublicOrAuthPage) {
+      setIsLoggingOut(false);
+    }
+  }, [isLoggingOut, session, location.pathname]);
+
+  // 1. Single Global Auth State Change Listener + Initial Session Resolution
+  useEffect(() => {
+    let isMounted = true;
+    let authEventReceived = false;
+
+    const applySession = (currentSession: Session | null) => {
       setSession(currentSession);
       const currentUser = currentSession?.user ?? null;
       setSupabaseUser(currentUser);
       setUser(mapSupabaseUserToProfile(currentUser));
+      if (currentUser) {
+        wasAuthenticatedRef.current = true;
+        setIsLoggingOut(false);
+      }
       setIsLoading(false);
+    };
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((event, currentSession) => {
+      if (!isMounted) return;
+      authEventReceived = true;
+
+      if (
+        event === "SIGNED_OUT" &&
+        wasAuthenticatedRef.current &&
+        pathnameRef.current !== ROUTES.RESET_PASSWORD
+      ) {
+        wasAuthenticatedRef.current = false;
+        setIsLoggingOut(true);
+      } else if (!currentSession) {
+        wasAuthenticatedRef.current = false;
+      }
+
+      applySession(currentSession);
     });
 
-    // Initial session fallback in case event hasn't fired yet
     supabase.auth
       .getSession()
-      .then(({ data: { session: initialSession } }) => {
-        setIsLoading((loading) => {
-          if (loading) {
-            setSession(initialSession);
-            const currentUser = initialSession?.user ?? null;
-            setSupabaseUser(currentUser);
-            setUser(mapSupabaseUserToProfile(currentUser));
-            return false;
-          }
-          return false;
-        });
+      .then(({ data: { session: initialSession }, error }) => {
+        if (!isMounted) return;
+        if (error) {
+          console.warn("[Auth] getSession error:", error);
+        }
+        if (!authEventReceived) {
+          applySession(initialSession ?? null);
+        }
       })
       .catch((err) => {
+        if (!isMounted) return;
         console.warn("[Auth] getSession error:", err);
-        setIsLoading(false);
+        if (!authEventReceived) {
+          setIsLoading(false);
+        }
       });
 
     return () => {
+      isMounted = false;
       subscription.unsubscribe();
     };
   }, []);
@@ -307,8 +364,9 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   };
 
   const logout = async () => {
+    setIsLoggingOut(true);
     await signOut();
-    window.location.href = ROUTES.LOGIN;
+    navigate(ROUTES.HOME, { replace: true });
   };
 
   return (
@@ -319,6 +377,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         session,
         isAuthenticated: Boolean(user && session),
         isLoading,
+        isLoggingOut,
         signIn,
         signUp,
         signOut,

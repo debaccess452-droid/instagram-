@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate, useLocation } from "react-router-dom";
 import {
   AuthCard,
   AuthHeader,
@@ -14,6 +14,7 @@ import {
 } from "@/components/auth";
 import { useAuth } from "@/hooks/useAuth";
 import { ROUTES } from "@/constants/routes";
+import { getSafeRedirectPath } from "@/routes/routeUtils";
 
 const REMEMBERED_EMAIL_KEY = "virulmuse_remembered_email";
 
@@ -28,6 +29,8 @@ export const Login: React.FC = () => {
 
   const { signIn, signInWithGoogle } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
+  const redirectTarget = getSafeRedirectPath(location.state);
 
   // Load remembered email safely on mount
   useEffect(() => {
@@ -93,7 +96,7 @@ export const Login: React.FC = () => {
 
       setSuccess(true);
       setLoading(false);
-      navigate(ROUTES.DASHBOARD);
+      navigate(redirectTarget, { replace: true });
     } catch (err: any) {
       setError(err?.message || "An unexpected error occurred during sign in.");
       setLoading(false);

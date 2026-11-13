@@ -3,8 +3,11 @@ import { Link } from "react-router-dom";
 import { ArrowLeft } from "lucide-react";
 import { Button } from "@/components/buttons";
 import { ROUTES } from "@/constants/routes";
+import { useAuth } from "@/hooks/useAuth";
 
 export const NotFound: React.FC = () => {
+  const { isAuthenticated } = useAuth();
+
   return (
     <div className="min-h-screen flex flex-col items-center justify-center bg-background text-text-primary px-4 text-center">
       <p className="text-sm font-bold uppercase tracking-widest text-primary">404 Error</p>
@@ -13,14 +16,16 @@ export const NotFound: React.FC = () => {
         The page you are looking for doesn't exist or has been moved.
       </p>
       <div className="mt-6 flex items-center gap-3">
-        <Link to={ROUTES.HOME}>
+        <Link to={isAuthenticated ? ROUTES.DASHBOARD : ROUTES.HOME}>
           <Button variant="primary" leftIcon={<ArrowLeft className="h-4 w-4" />}>
-            Back to Home
+            {isAuthenticated ? "Back to Dashboard" : "Back to Home"}
           </Button>
         </Link>
-        <Link to={ROUTES.DASHBOARD}>
-          <Button variant="secondary">Go to Dashboard</Button>
-        </Link>
+        {!isAuthenticated && (
+          <Link to={ROUTES.DASHBOARD}>
+            <Button variant="secondary">Go to Dashboard</Button>
+          </Link>
+        )}
       </div>
     </div>
   );

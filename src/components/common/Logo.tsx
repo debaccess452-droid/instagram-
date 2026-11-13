@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { Sparkles } from "lucide-react";
 import { cn } from "@/utils/cn";
 import { ROUTES } from "@/constants/routes";
+import { useAuth } from "@/hooks/useAuth";
 
 export interface LogoProps {
   className?: string;
@@ -15,6 +16,8 @@ export const Logo: React.FC<LogoProps> = ({
   size = "md",
   showText = true,
 }) => {
+  const { isAuthenticated } = useAuth();
+
   const iconSizes = {
     sm: "h-7 w-7",
     md: "h-9 w-9",
@@ -29,7 +32,7 @@ export const Logo: React.FC<LogoProps> = ({
 
   return (
     <Link
-      to={ROUTES.HOME}
+      to={isAuthenticated ? ROUTES.DASHBOARD : ROUTES.HOME}
       className={cn(
         "inline-flex items-center gap-2.5 font-bold tracking-tight text-text-primary focus:outline-none focus:ring-2 focus:ring-primary/50 rounded-sm",
         className

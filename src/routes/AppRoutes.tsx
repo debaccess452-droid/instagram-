@@ -64,8 +64,10 @@ import { NotFound } from "@/pages/errors/NotFound/NotFound";
 export const AppRoutes: React.FC = () => {
   return (
     <Routes>
-      {/* Landing has its own Navbar/Footer composition */}
-      <Route path={ROUTES.HOME} element={<Landing />} />
+      {/* Root / Landing Page: redirects authenticated users to Dashboard; shows Landing to guests */}
+      <Route element={<PublicRoute />}>
+        <Route path={ROUTES.HOME} element={<Landing />} />
+      </Route>
 
       {/* Public Website pages */}
       <Route element={<WebsiteLayout />}>

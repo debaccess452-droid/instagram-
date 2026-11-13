@@ -382,7 +382,7 @@ export interface VisualBackendScene {
   environment: VisualBackendSceneEnvironment;
   camera: VisualBackendSceneCamera;
   composition: VisualBackendSceneComposition;
-  on_screen_text: string[];
+  on_screen_text?: string[];
 }
 
 export interface VisualBackendTransition {
@@ -426,8 +426,8 @@ export interface VisualBackendOverview {
 export interface VisualBackendResult {
   video_overview: VisualBackendOverview;
   scenes: VisualBackendScene[];
-  transitions: VisualBackendTransition[];
-  visual_elements: VisualBackendElements;
+  transitions?: VisualBackendTransition[];
+  visual_elements?: VisualBackendElements;
   analysis_metadata: VisualBackendMetadata;
 }
 

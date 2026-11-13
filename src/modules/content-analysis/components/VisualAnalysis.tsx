@@ -10,9 +10,7 @@ import {
   Check,
   Film,
   Camera,
-  Scissors,
   Palette,
-  Type,
   AlertTriangle,
   Loader2,
   Sparkles,
@@ -123,7 +121,6 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
 }) => {
   const [copiedSceneId, setCopiedSceneId] = useState<string | number | null>(null);
   const [copiedAll, setCopiedAll] = useState(false);
-  const [copiedText, setCopiedText] = useState(false);
 
   const normalizedStatus = String(status || "").trim().toLowerCase();
   const isCompletedStatus = normalizedStatus === "completed";
@@ -181,7 +178,7 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
       ? "Using the adaptively selected representative frames to analyze visible scenes, subjects, and on-screen details."
       : isQueuedStatus
       ? "Your Reel visual analysis job is queued in the background. Monitoring existing job status..."
-      : "Observing scenes, camera framing, visible subjects, transitions, and on-screen text from your uploaded Reel.";
+      : "Observing scenes, camera framing, visible subjects, and visual composition from your uploaded Reel.";
 
     const activeFooterLabel = progressStepMessage
       ? "Analyzing video progressively in browser"
@@ -311,7 +308,7 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
             Your Reel is stored in private Supabase Storage. Run the Visual Analysis pipeline
             (Gemini primary full-video analysis, with adaptive scene-aware frame sampling up to a
             30-frame safety ceiling for Groq fallback readiness)
-            to observe scenes, camera framing, subject actions, lighting, transitions, and on-screen text.
+            to observe scenes, camera framing, subject actions, lighting, and visual composition.
           </p>
         </div>
         {onAnalyzeVisual && (
@@ -372,14 +369,6 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
     const scenes = [...(realData.scenes || [])].sort(
       (a, b) => (a.start_time_seconds ?? 0) - (b.start_time_seconds ?? 0)
     );
-    const transitions = [...(realData.transitions || [])].sort(
-      (a, b) => (a.timestamp_seconds ?? 0) - (b.timestamp_seconds ?? 0)
-    );
-    const visualElements = realData.visual_elements || {
-      readable_text: [],
-      logos_and_graphics: [],
-      recurring_visual_elements: [],
-    };
     const metadata = realData.analysis_metadata || { warnings: [] };
 
     // Unique framings & movements observed
@@ -419,14 +408,6 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
       navigator.clipboard.writeText(text);
       setCopiedSceneId(id);
       setTimeout(() => setCopiedSceneId(null), 1800);
-    };
-
-    const handleCopyReadableText = () => {
-      if (visualElements.readable_text?.length > 0) {
-        navigator.clipboard.writeText(visualElements.readable_text.join("\n"));
-        setCopiedText(true);
-        setTimeout(() => setCopiedText(false), 2000);
-      }
     };
 
     const providerIdentityText = [metadata.provider, metadata.source, metadata.model]
@@ -697,23 +678,6 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
                       </p>
                     </div>
                   </div>
-
-                  {/* On-screen text for this scene if present */}
-                  {scene.on_screen_text && scene.on_screen_text.length > 0 && (
-                    <div className="flex items-center gap-2 pt-1 text-[11px] text-text-muted">
-                      <span className="font-semibold text-primary">On-screen text:</span>
-                      <div className="flex flex-wrap gap-1.5">
-                        {scene.on_screen_text.map((txt, tIdx) => (
-                          <span
-                            key={tIdx}
-                            className="px-2 py-0.5 rounded bg-background-elevated text-text-primary font-mono text-[10px] border border-card-border"
-                          >
-                            "{txt}"
-                          </span>
-                        ))}
-                      </div>
-                    </div>
-                  )}
                 </div>
               ))}
             </div>
@@ -784,69 +748,7 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
         </div>
 
         {/* =================================================================== */}
-        {/* SECTION 4: Editing and Transitions                                  */}
-        {/* =================================================================== */}
-        <div className="rounded-xl border border-card-border bg-card p-5 space-y-4 shadow-card">
-          <div className="flex items-center gap-2.5 border-b border-card-border/60 pb-3">
-            <span className="p-2 rounded-lg bg-primary/15 text-primary border border-primary/25">
-              <Scissors className="h-4 w-4" />
-            </span>
-            <div>
-              <h3 className="text-sm font-bold text-text-primary">
-                4. Editing and Transitions ({transitions.length} {transitions.length === 1 ? "Event" : "Events"})
-              </h3>
-              <p className="text-[11px] text-text-muted">
-                Observed cuts, transitions, and frame discontinuities
-              </p>
-            </div>
-          </div>
-
-          {transitions.length > 0 ? (
-            <div className="overflow-x-auto rounded-lg border border-card-border">
-              <table className="w-full text-left text-xs">
-                <thead className="bg-background-elevated border-b border-card-border text-[11px] uppercase tracking-wider text-text-muted font-semibold">
-                  <tr>
-                    <th scope="col" className="w-32 px-4 py-2.5">Timestamp</th>
-                    <th scope="col" className="w-40 px-4 py-2.5">Transition Type</th>
-                    <th scope="col" className="px-4 py-2.5">Observable Visual Change</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-card-border/60 bg-card">
-                  {transitions.map((item, idx) => (
-                    <tr key={idx} className="hover:bg-background-elevated/40 transition-colors">
-                      <td className="px-4 py-2.5 whitespace-nowrap">
-                        <button
-                          type="button"
-                          onClick={() => onSeek(item.timestamp_seconds)}
-                          className="inline-flex items-center gap-1 rounded bg-primary/10 hover:bg-primary/20 text-primary border border-primary/25 px-2 py-0.5 font-mono text-[11px] font-semibold transition-colors cursor-pointer"
-                          title="Seek video to transition"
-                        >
-                          <Play className="h-2.5 w-2.5 fill-current" />
-                          <span>{formatSecondsToTimestamp(item.timestamp_seconds)}</span>
-                        </button>
-                      </td>
-                      <td className="px-4 py-2.5 font-semibold text-text-primary">
-                        <span className="inline-block px-2 py-0.5 rounded bg-background-elevated border border-card-border text-[11px]">
-                          {item.transition_type || "Cut"}
-                        </span>
-                      </td>
-                      <td className="px-4 py-2.5 text-text-secondary leading-relaxed">
-                        {item.observable_change || "Scene cut detected"}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ) : (
-            <p className="text-xs text-text-muted italic">
-              No distinct transition events detected in the sampled frames.
-            </p>
-          )}
-        </div>
-
-        {/* =================================================================== */}
-        {/* SECTION 5: Visual Composition & Palette                             */}
+        {/* SECTION 4: Visual Composition & Palette                             */}
         {/* =================================================================== */}
         <div className="rounded-xl border border-card-border bg-card p-5 space-y-4 shadow-card">
           <div className="flex items-center gap-2.5 border-b border-card-border/60 pb-3">
@@ -855,7 +757,7 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
             </span>
             <div>
               <h3 className="text-sm font-bold text-text-primary">
-                5. Visual Composition & Palette
+                4. Visual Composition & Palette
               </h3>
               <p className="text-[11px] text-text-muted">
                 Dominant color tones, subject placement, and lighting appearance
@@ -901,107 +803,7 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
         </div>
 
         {/* =================================================================== */}
-        {/* SECTION 6: On-Screen Visual Elements                                */}
-        {/* =================================================================== */}
-        <div className="rounded-xl border border-card-border bg-card p-5 space-y-4 shadow-card">
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 border-b border-card-border/60 pb-3">
-            <div className="flex items-center gap-2.5">
-              <span className="p-2 rounded-lg bg-primary/15 text-primary border border-primary/25">
-                <Type className="h-4 w-4" />
-              </span>
-              <div>
-                <h3 className="text-sm font-bold text-text-primary">
-                  6. On-Screen Visual Elements
-                </h3>
-                <p className="text-[11px] text-text-muted">
-                  Readable on-screen text, logos, graphical overlays, and recurring visual elements
-                </p>
-              </div>
-            </div>
-
-            {visualElements.readable_text?.length > 0 && (
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={handleCopyReadableText}
-                leftIcon={
-                  copiedText ? (
-                    <Check className="h-3 w-3 text-success" />
-                  ) : (
-                    <Copy className="h-3 w-3" />
-                  )
-                }
-              >
-                {copiedText ? "Copied Text" : "Copy Text"}
-              </Button>
-            )}
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
-            {/* Readable Text */}
-            <div className="rounded-lg bg-background-elevated/70 p-3.5 border border-card-border space-y-2">
-              <span className="text-[10px] font-semibold text-text-muted uppercase tracking-wider block">
-                Readable Text ({visualElements.readable_text?.length || 0}):
-              </span>
-              {visualElements.readable_text && visualElements.readable_text.length > 0 ? (
-                <ul className="space-y-1 text-[11px] max-h-48 overflow-y-auto pr-1">
-                  {visualElements.readable_text.map((txt, idx) => (
-                    <li key={idx} className="p-1.5 rounded bg-card border border-card-border text-text-primary font-mono text-[10px]">
-                      "{txt}"
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="text-text-muted italic text-[11px]">
-                  No readable text detected in the sampled frames.
-                </p>
-              )}
-            </div>
-
-            {/* Logos & Graphics */}
-            <div className="rounded-lg bg-background-elevated/70 p-3.5 border border-card-border space-y-2">
-              <span className="text-[10px] font-semibold text-text-muted uppercase tracking-wider block">
-                Logos & Graphics ({visualElements.logos_and_graphics?.length || 0}):
-              </span>
-              {visualElements.logos_and_graphics && visualElements.logos_and_graphics.length > 0 ? (
-                <ul className="space-y-1 text-[11px]">
-                  {visualElements.logos_and_graphics.map((logo, idx) => (
-                    <li key={idx} className="text-text-primary">
-                      • {logo}
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="text-text-muted italic text-[11px]">
-                  No distinct logos or graphical overlays detected.
-                </p>
-              )}
-            </div>
-
-            {/* Recurring Visual Elements */}
-            <div className="rounded-lg bg-background-elevated/70 p-3.5 border border-card-border space-y-2">
-              <span className="text-[10px] font-semibold text-text-muted uppercase tracking-wider block">
-                Recurring Visual Elements:
-              </span>
-              {visualElements.recurring_visual_elements && visualElements.recurring_visual_elements.length > 0 ? (
-                <ul className="space-y-1 text-[11px]">
-                  {visualElements.recurring_visual_elements.map((el, idx) => (
-                    <li key={idx} className="text-text-primary">
-                      • {el}
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="text-text-muted italic text-[11px]">
-                  No recurring visual elements identified.
-                </p>
-              )}
-            </div>
-          </div>
-        </div>
-
-        {/* =================================================================== */}
-        {/* SECTION 7: Analysis Warnings & Methodology Notice                   */}
+        {/* SECTION 5: Analysis Warnings & Methodology Notice                   */}
         {/* =================================================================== */}
         <div className="rounded-xl border border-card-border bg-card p-5 space-y-4 shadow-card">
           <div className="flex items-center gap-2 text-xs font-semibold text-text-primary">
@@ -1076,7 +878,7 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
               Adaptive sampling targets visual changes (scene cuts, outfit/background shifts, framing changes, and text overlays) rather than capturing every video frame; rapid flashes or brief events between sampled timestamps may not be captured.
             </p>
             <p className="text-[11px] text-text-muted">
-              Evidence & accuracy policy: Scene timestamps remain chronological and transitions between unsampled frames are not fabricated. Technical camera hardware, lens specs, lighting gear, unidentifiable people, and unreadable text are never invented.
+              Evidence & accuracy policy: Scene timestamps remain chronological and events between unsampled frames are not fabricated. Technical camera hardware, lens specs, lighting gear, and unidentifiable people are never invented.
             </p>
           </div>
 

@@ -2011,7 +2011,7 @@ export const ContentAnalysisPage: React.FC = () => {
                           {realAudioRecord.file_name}
                         </p>
                         <p className="text-[11px] text-text-muted font-mono">
-                          Click any scene or transition timestamp to jump to that moment in the video.
+                          Click any scene timestamp to jump to that moment in the video.
                         </p>
                       </div>
                     </div>

@@ -724,21 +724,63 @@ class ContentAnalysisService {
   }
 
   /**
-   * Computes normalized mean absolute RGB difference (0..1) between two 32x32 RGBA buffers.
+   * Computes global mean RGB difference and localized 4x4 spatial-grid peak difference
+   * between two downscaled RGBA frame signatures (0..1 scale).
+   * Using both global and regional differences catches full scene cuts, outfit/background
+   * shifts, camera-framing changes, and localized on-screen text changes.
    */
-  private computeFrameSignatureDiff(a: Uint8ClampedArray, b: Uint8ClampedArray): number {
+  private computeAdaptiveFrameDiff(
+    a: Uint8ClampedArray,
+    b: Uint8ClampedArray,
+    gridDimension = 64
+  ): { meanDiff: number; maxRegionDiff: number; combinedScore: number } {
     const len = Math.min(a.length, b.length);
-    if (len === 0) return 1;
+    if (len === 0 || gridDimension <= 0) {
+      return { meanDiff: 1, maxRegionDiff: 1, combinedScore: 1 };
+    }
+
+    const cellsPerAxis = 4;
+    const cellSize = Math.max(1, Math.floor(gridDimension / cellsPerAxis));
+    const cellSums = new Float64Array(cellsPerAxis * cellsPerAxis);
+    const cellCounts = new Uint32Array(cellsPerAxis * cellsPerAxis);
+
     let totalDiff = 0;
     let pixelCount = 0;
-    for (let i = 0; i < len; i += 4) {
-      totalDiff +=
-        Math.abs(a[i] - b[i]) +
-        Math.abs(a[i + 1] - b[i + 1]) +
-        Math.abs(a[i + 2] - b[i + 2]);
+    const totalPixels = Math.min(gridDimension * gridDimension, Math.floor(len / 4));
+
+    for (let p = 0; p < totalPixels; p++) {
+      const idx = p * 4;
+      const diff =
+        (Math.abs(a[idx] - b[idx]) +
+          Math.abs(a[idx + 1] - b[idx + 1]) +
+          Math.abs(a[idx + 2] - b[idx + 2])) /
+        (3 * 255);
+
+      totalDiff += diff;
       pixelCount++;
+
+      const x = p % gridDimension;
+      const y = Math.floor(p / gridDimension);
+      const cx = Math.min(cellsPerAxis - 1, Math.floor(x / cellSize));
+      const cy = Math.min(cellsPerAxis - 1, Math.floor(y / cellSize));
+      const cellIdx = cy * cellsPerAxis + cx;
+      cellSums[cellIdx] += diff;
+      cellCounts[cellIdx]++;
     }
-    return pixelCount > 0 ? totalDiff / (pixelCount * 3 * 255) : 1;
+
+    const meanDiff = pixelCount > 0 ? totalDiff / pixelCount : 1;
+    let maxRegionDiff = 0;
+    for (let c = 0; c < cellSums.length; c++) {
+      if (cellCounts[c] > 0) {
+        const regionMean = cellSums[c] / cellCounts[c];
+        if (regionMean > maxRegionDiff) {
+          maxRegionDiff = regionMean;
+        }
+      }
+    }
+
+    const combinedScore = Math.max(meanDiff, maxRegionDiff * 0.65);
+    return { meanDiff, maxRegionDiff, combinedScore };
   }
 
   /**
@@ -756,25 +798,48 @@ class ContentAnalysisService {
   }
 
   /**
-   * Extracts up to 8 representative JPEG frames for Visual Analysis across the entire video duration.
-   * Prioritizes visually significant scene changes across evenly distributed time windows,
-   * avoids duplicate/near-identical frames, preserves chronological order,
-   * resizes to max 960px, encodes JPEG ~0.72 quality (< 2 MB),
-   * and continues with remaining valid frames if individual frames fail.
+   * Performs adaptive, scene-aware frame sampling across the uploaded Reel using
+   * progressive HTML video seeking and canvas capture.
+   *
+   * - Uses a time-based baseline to cover the entire duration.
+   * - Compares consecutive 64x64 RGBA signatures (global + 4x4 grid diffs) to detect
+   *   scene changes, jump cuts, outfit/background/framing changes, and text overlay changes.
+   * - Refines sampling around detected visual changes and suppresses near-duplicate frames.
+   * - Produces a variable number of frames up to a 30-frame safety ceiling; if reached,
+   *   prioritizes the most visually distinct moments and returns an explicit warning.
+   * - Encodes each selected frame as JPEG (<= 960px longest side, ~0.72 quality, < 2 MB).
    */
   public async extractVisualAnalysisFrames(
     videoBlob: Blob,
-    fallbackDurationSeconds?: number | null
-  ): Promise<Array<{ blob: Blob; timestamp_seconds: number }>> {
+    fallbackDurationSeconds?: number | null,
+    options?: {
+      onProgress?: (stage: "detecting" | "selecting", detail?: string) => void;
+    }
+  ): Promise<{
+    frames: Array<{ blob: Blob; timestamp_seconds: number }>;
+    samplingLimitReached: boolean;
+    totalCandidateChanges: number;
+    scannedSamples: number;
+    warning: string | null;
+  }> {
     if (!videoBlob || videoBlob.size === 0) {
       throw new Error("Downloaded Reel video file is empty or unreadable.");
     }
+
+    const MAX_VISUAL_FRAMES = 30;
+    const SIG_DIM = 64;
 
     const objectUrl = URL.createObjectURL(videoBlob);
     const video = document.createElement("video");
     video.preload = "auto";
     video.muted = true;
     video.playsInline = true;
+
+    const sigCanvas = document.createElement("canvas");
+    sigCanvas.width = SIG_DIM;
+    sigCanvas.height = SIG_DIM;
+
+    const encodeCanvas = document.createElement("canvas");
 
     try {
       // 1. Wait for video metadata and first decodable frame with 25s timeout
@@ -894,39 +959,65 @@ class ContentAnalysisService {
         });
       };
 
-      const encodeCurrentFrame = async (
-        fallbackTimestamp: number
-      ): Promise<{
-        blob: Blob;
-        timestamp_seconds: number;
-        signature: Uint8ClampedArray;
-      } | null> => {
-        await new Promise<void>((resolve) => {
+      const waitFramePaint = () =>
+        new Promise<void>((resolve) => {
           if (typeof requestAnimationFrame === "function") {
             requestAnimationFrame(() => resolve());
           } else {
-            setTimeout(resolve, 25);
+            setTimeout(resolve, 20);
           }
         });
+
+      const captureSignatureAt = async (
+        desiredTimestamp: number
+      ): Promise<{
+        timestamp_seconds: number;
+        signature: Uint8ClampedArray;
+        brightness: number;
+      } | null> => {
+        let target = desiredTimestamp;
+        try {
+          await seekToTimestamp(target);
+        } catch {
+          const fallbackOffset = Math.max(0, Number((target - 0.18).toFixed(2)));
+          if (fallbackOffset !== target) {
+            target = fallbackOffset;
+            await seekToTimestamp(target);
+          } else {
+            return null;
+          }
+        }
+
+        await waitFramePaint();
+        if (!video.videoWidth || !video.videoHeight) return null;
+
+        const sigCtx = sigCanvas.getContext("2d", { willReadFrequently: true });
+        if (!sigCtx) return null;
+        sigCtx.drawImage(video, 0, 0, SIG_DIM, SIG_DIM);
+        const signature = new Uint8ClampedArray(sigCtx.getImageData(0, 0, SIG_DIM, SIG_DIM).data);
+        const brightness = this.computeFrameBrightness(signature);
+
+        const rawCaptured = video.currentTime > 0 ? video.currentTime : target;
+        const timestamp_seconds = Number(
+          Math.max(0, Math.min(rawCaptured, safeDuration)).toFixed(2)
+        );
+
+        return {
+          timestamp_seconds,
+          signature,
+          brightness,
+        };
+      };
+
+      const encodeJpegAt = async (
+        desiredTimestamp: number
+      ): Promise<{ blob: Blob; timestamp_seconds: number } | null> => {
+        await seekToTimestamp(desiredTimestamp);
+        await waitFramePaint();
 
         const origW = video.videoWidth;
         const origH = video.videoHeight;
         if (!origW || !origH) return null;
-
-        // Compact 32x32 signature for duplicate & scene-change detection
-        const sigCanvas = document.createElement("canvas");
-        sigCanvas.width = 32;
-        sigCanvas.height = 32;
-        let signature: Uint8ClampedArray;
-        try {
-          const sigCtx = sigCanvas.getContext("2d");
-          if (!sigCtx) return null;
-          sigCtx.drawImage(video, 0, 0, 32, 32);
-          signature = new Uint8ClampedArray(sigCtx.getImageData(0, 0, 32, 32).data);
-        } finally {
-          sigCanvas.width = 0;
-          sigCanvas.height = 0;
-        }
 
         // Resize proportionally so longest dimension <= 960px
         const maxDim = 960;
@@ -942,228 +1033,306 @@ class ContentAnalysisService {
           }
         }
 
-        const canvas = document.createElement("canvas");
-        canvas.width = targetW;
-        canvas.height = targetH;
+        encodeCanvas.width = targetW;
+        encodeCanvas.height = targetH;
 
-        try {
-          const ctx = canvas.getContext("2d");
-          if (!ctx) return null;
-          ctx.drawImage(video, 0, 0, targetW, targetH);
+        const ctx = encodeCanvas.getContext("2d");
+        if (!ctx) return null;
+        ctx.drawImage(video, 0, 0, targetW, targetH);
 
-          let quality = 0.72;
-          let frameBlob = await new Promise<Blob | null>((res) =>
-            canvas.toBlob(res, "image/jpeg", quality)
-          );
-
-          // Ensure each JPEG stays strictly under 2 MB
-          while (
-            frameBlob &&
-            frameBlob.size >= 2 * 1024 * 1024 &&
-            quality > 0.25
-          ) {
-            quality = Number((quality - 0.12).toFixed(2));
-            frameBlob = await new Promise<Blob | null>((res) =>
-              canvas.toBlob(res, "image/jpeg", quality)
-            );
-          }
-
-          if (!frameBlob || frameBlob.size === 0 || frameBlob.size >= 2 * 1024 * 1024) {
-            return null;
-          }
-
-          const rawCaptured =
-            video.currentTime > 0 ? video.currentTime : fallbackTimestamp;
-          const timestamp_seconds = Number(
-            Math.max(0, Math.min(rawCaptured, safeDuration)).toFixed(2)
-          );
-
-          return {
-            blob: frameBlob,
-            timestamp_seconds,
-            signature,
-          };
-        } finally {
-          canvas.width = 0;
-          canvas.height = 0;
-        }
-      };
-
-      const seekAndCapture = async (desiredTimestamp: number) => {
-        let target = desiredTimestamp;
-        try {
-          await seekToTimestamp(target);
-        } catch {
-          const fallbackOffset = Math.max(0, Number((target - 0.2).toFixed(2)));
-          if (fallbackOffset !== target) {
-            target = fallbackOffset;
-            await seekToTimestamp(target);
-          } else {
-            return null;
-          }
-        }
-        return encodeCurrentFrame(target);
-      };
-
-      // 2. Build evenly distributed time windows across the full video duration (up to 8)
-      const MAX_FRAMES = 8;
-      const windowProbes: number[][] = [];
-
-      if (safeDuration <= 0.15) {
-        windowProbes.push([Number((safeDuration * 0.5).toFixed(2))]);
-      } else if (safeDuration < 1.2) {
-        const count = Math.max(2, Math.min(MAX_FRAMES, Math.floor(safeDuration / 0.15)));
-        const minBound = 0.03;
-        const maxBound = Math.max(minBound, safeDuration - 0.03);
-        const span = maxBound - minBound;
-        for (let i = 0; i < count; i++) {
-          const t = Number(
-            (minBound + (count === 1 ? 0.5 * span : (i / (count - 1)) * span)).toFixed(2)
-          );
-          windowProbes.push([t]);
-        }
-      } else {
-        const minBound = Math.max(0.05, Number((safeDuration * 0.03).toFixed(2)));
-        const maxBound = Math.min(
-          safeDuration - 0.05,
-          Number((safeDuration * 0.97).toFixed(2))
+        let quality = 0.72;
+        let frameBlob = await new Promise<Blob | null>((res) =>
+          encodeCanvas.toBlob(res, "image/jpeg", quality)
         );
-        const totalSpan = Math.max(0.5, maxBound - minBound);
-        const windowSize = totalSpan / MAX_FRAMES;
 
-        for (let w = 0; w < MAX_FRAMES; w++) {
-          const wStart = minBound + w * windowSize;
-          if (w === 0) {
-            windowProbes.push([
-              Number((wStart + windowSize * 0.18).toFixed(2)),
-              Number((wStart + windowSize * 0.65).toFixed(2)),
-            ]);
-          } else if (w === MAX_FRAMES - 1) {
-            windowProbes.push([
-              Number((wStart + windowSize * 0.3).toFixed(2)),
-              Number((wStart + windowSize * 0.82).toFixed(2)),
-            ]);
-          } else {
-            windowProbes.push([
-              Number((wStart + windowSize * 0.25).toFixed(2)),
-              Number((wStart + windowSize * 0.75).toFixed(2)),
-            ]);
-          }
+        // Ensure each JPEG stays strictly below 2 MB
+        while (frameBlob && frameBlob.size >= 2 * 1024 * 1024 && quality > 0.25) {
+          quality = Number((quality - 0.12).toFixed(2));
+          frameBlob = await new Promise<Blob | null>((res) =>
+            encodeCanvas.toBlob(res, "image/jpeg", quality)
+          );
         }
-      }
 
-      const acceptedFrames: Array<{
-        blob: Blob;
+        if (!frameBlob || frameBlob.size === 0 || frameBlob.size >= 2 * 1024 * 1024) {
+          return null;
+        }
+
+        const rawCaptured = video.currentTime > 0 ? video.currentTime : desiredTimestamp;
+        const timestamp_seconds = Number(
+          Math.max(0, Math.min(rawCaptured, safeDuration)).toFixed(2)
+        );
+
+        return {
+          blob: frameBlob,
+          timestamp_seconds,
+        };
+      };
+
+      // 2. Progressive time-based baseline scan across the full video duration
+      options?.onProgress?.("detecting", "Detecting visual changes across your Reel...");
+
+      type SamplePoint = {
         timestamp_seconds: number;
         signature: Uint8ClampedArray;
-      }> = [];
+        brightness: number;
+      };
 
-      const DUPLICATE_THRESHOLD = 0.01; // ~1% mean RGB difference threshold
+      const scanTimestamps: number[] = [];
+      if (safeDuration <= 0.25) {
+        scanTimestamps.push(Number((safeDuration * 0.5).toFixed(2)));
+      } else {
+        const minBound =
+          safeDuration < 1.5
+            ? 0.03
+            : Math.max(0.05, Number((safeDuration * 0.02).toFixed(2)));
+        const maxBound = Math.max(
+          minBound,
+          safeDuration < 1.5
+            ? safeDuration - 0.03
+            : Math.min(safeDuration - 0.05, Number((safeDuration * 0.98).toFixed(2)))
+        );
+        const span = Math.max(0.1, maxBound - minBound);
+        const targetBaselineScans = Math.min(54, Math.max(4, Math.round(safeDuration / 0.55)));
+        const step = span / Math.max(1, targetBaselineScans - 1);
 
-      // 3. Evaluate each chronological window, prioritizing scene changes & avoiding duplicates
-      for (let w = 0; w < windowProbes.length; w++) {
-        const probes = windowProbes[w];
-        const candidates: Array<{
-          blob: Blob;
-          timestamp_seconds: number;
-          signature: Uint8ClampedArray;
-        }> = [];
-
-        for (const t of probes) {
-          const lastAcceptedTs =
-            acceptedFrames.length > 0
-              ? acceptedFrames[acceptedFrames.length - 1].timestamp_seconds
-              : -1;
-          if (lastAcceptedTs >= 0 && t <= lastAcceptedTs + 0.04) {
-            continue;
+        for (let i = 0; i < targetBaselineScans; i++) {
+          const t = Number(Math.min(maxBound, minBound + i * step).toFixed(2));
+          if (scanTimestamps.length === 0 || t > scanTimestamps[scanTimestamps.length - 1] + 0.04) {
+            scanTimestamps.push(t);
           }
-
-          try {
-            const captured = await seekAndCapture(t);
-            if (captured) {
-              if (lastAcceptedTs < 0 || captured.timestamp_seconds > lastAcceptedTs + 0.03) {
-                candidates.push(captured);
-              }
-            }
-          } catch (frameErr) {
-            console.warn(
-              `[ContentAnalysisService] Skipping visual probe at ${t}s due to extraction error:`,
-              frameErr
-            );
-          }
-        }
-
-        if (candidates.length === 0) {
-          continue;
-        }
-
-        let chosen = candidates[0];
-
-        if (acceptedFrames.length === 0) {
-          // For initial window, avoid picking a near-black fade-in if second probe has clear content
-          if (candidates.length > 1) {
-            const b0 = this.computeFrameBrightness(candidates[0].signature);
-            const b1 = this.computeFrameBrightness(candidates[1].signature);
-            if (b0 < 14 && b1 >= 18) {
-              chosen = candidates[1];
-            }
-          }
-        } else {
-          // Pick candidate within this window with the strongest visual change from the previous frame
-          const prevSig = acceptedFrames[acceptedFrames.length - 1].signature;
-          let bestDiff = this.computeFrameSignatureDiff(prevSig, candidates[0].signature);
-          for (let c = 1; c < candidates.length; c++) {
-            const diff = this.computeFrameSignatureDiff(prevSig, candidates[c].signature);
-            if (diff > bestDiff) {
-              bestDiff = diff;
-              chosen = candidates[c];
-            }
-          }
-
-          // Skip near-duplicate / identical frames compared to any already selected frame
-          let minDiffToAccepted = 1;
-          for (const existing of acceptedFrames) {
-            const d = this.computeFrameSignatureDiff(existing.signature, chosen.signature);
-            if (d < minDiffToAccepted) {
-              minDiffToAccepted = d;
-            }
-          }
-
-          if (minDiffToAccepted < DUPLICATE_THRESHOLD) {
-            continue;
-          }
-        }
-
-        acceptedFrames.push(chosen);
-        if (acceptedFrames.length >= MAX_FRAMES) {
-          break;
         }
       }
 
-      // Guarantee at least 1 valid frame on edge-case videos if window loop produced none
-      if (acceptedFrames.length === 0) {
+      const rawSamples: SamplePoint[] = [];
+      let refinementProbesUsed = 0;
+      const MAX_REFINEMENT_PROBES = 18;
+
+      for (let i = 0; i < scanTimestamps.length; i++) {
+        const t = scanTimestamps[i];
+        try {
+          const current = await captureSignatureAt(t);
+          if (!current) continue;
+
+          // When a strong visual change occurs across a wide interval, extract a midpoint probe
+          // around the change to avoid missing intermediate cuts or blurred transitions
+          const prev = rawSamples.length > 0 ? rawSamples[rawSamples.length - 1] : null;
+          if (
+            prev &&
+            refinementProbesUsed < MAX_REFINEMENT_PROBES &&
+            current.timestamp_seconds - prev.timestamp_seconds >= 0.45
+          ) {
+            const pairDiff = this.computeAdaptiveFrameDiff(
+              prev.signature,
+              current.signature,
+              SIG_DIM
+            );
+            if (pairDiff.meanDiff >= 0.05 || pairDiff.maxRegionDiff >= 0.1) {
+              const midTarget = Number(
+                ((prev.timestamp_seconds + current.timestamp_seconds) / 2).toFixed(2)
+              );
+              if (
+                midTarget > prev.timestamp_seconds + 0.08 &&
+                midTarget < current.timestamp_seconds - 0.08
+              ) {
+                refinementProbesUsed++;
+                try {
+                  const midSample = await captureSignatureAt(midTarget);
+                  if (
+                    midSample &&
+                    midSample.timestamp_seconds > prev.timestamp_seconds + 0.03 &&
+                    midSample.timestamp_seconds < current.timestamp_seconds - 0.03
+                  ) {
+                    rawSamples.push(midSample);
+                  }
+                } catch {
+                  // Continue scan if refinement seek fails
+                }
+              }
+            }
+          }
+
+          if (
+            rawSamples.length === 0 ||
+            current.timestamp_seconds > rawSamples[rawSamples.length - 1].timestamp_seconds + 0.03
+          ) {
+            rawSamples.push(current);
+          }
+        } catch (probeErr) {
+          console.warn(
+            `[ContentAnalysisService] Skipping visual scan probe at ${t}s:`,
+            probeErr
+          );
+        }
+      }
+
+      rawSamples.sort((a, b) => a.timestamp_seconds - b.timestamp_seconds);
+
+      // 3. Adaptive selection: scene/text/framing changes + temporal baseline + deduplication
+      options?.onProgress?.("selecting", "Selecting representative frames...");
+
+      type CandidateFrame = SamplePoint & {
+        distinctionScore: number;
+        isOpeningAnchor?: boolean;
+      };
+
+      const candidates: CandidateFrame[] = [];
+      const DUPLICATE_MEAN_THRESHOLD = 0.013;
+      const DUPLICATE_REGION_THRESHOLD = 0.042;
+      const CHANGE_MEAN_THRESHOLD = 0.042;
+      const CHANGE_REGION_THRESHOLD = 0.092;
+      const baselineAnchorInterval = Math.max(2.2, Math.min(5.0, safeDuration / 5));
+
+      if (rawSamples.length > 0) {
+        // Pick an initial non-black opening anchor if the very first sample is a dark fade-in
+        let startIdx = 0;
+        if (rawSamples[0].brightness < 14) {
+          const firstClearIdx = rawSamples.findIndex(
+            (s, idx) => idx > 0 && idx <= 3 && s.brightness >= 18
+          );
+          if (firstClearIdx > 0) {
+            startIdx = firstClearIdx;
+          }
+        }
+
+        candidates.push({
+          ...rawSamples[startIdx],
+          distinctionScore: 1,
+          isOpeningAnchor: true,
+        });
+
+        for (let i = startIdx + 1; i < rawSamples.length; i++) {
+          const curr = rawSamples[i];
+          const lastSelected = candidates[candidates.length - 1];
+
+          const diffFromLast = this.computeAdaptiveFrameDiff(
+            lastSelected.signature,
+            curr.signature,
+            SIG_DIM
+          );
+
+          // Skip near-duplicate frames compared to the immediately preceding selected frame
+          if (
+            diffFromLast.meanDiff < DUPLICATE_MEAN_THRESHOLD &&
+            diffFromLast.maxRegionDiff < DUPLICATE_REGION_THRESHOLD
+          ) {
+            continue;
+          }
+
+          const isSignificantChange =
+            diffFromLast.meanDiff >= CHANGE_MEAN_THRESHOLD ||
+            diffFromLast.maxRegionDiff >= CHANGE_REGION_THRESHOLD;
+
+          const elapsedSinceLast = curr.timestamp_seconds - lastSelected.timestamp_seconds;
+          const isBaselineAnchorDue =
+            elapsedSinceLast >= baselineAnchorInterval ||
+            (i === rawSamples.length - 1 &&
+              elapsedSinceLast >= Math.max(1.5, baselineAnchorInterval * 0.7));
+
+          if (!isSignificantChange && !isBaselineAnchorDue) {
+            continue;
+          }
+
+          // Also avoid repeating an already-captured static shot unless it marks a return
+          // after a meaningfully long gap or is visually distinct from recent frames
+          let minRecentMean = 1;
+          let minRecentRegion = 1;
+          const recentWindow = candidates.slice(-3);
+          for (const existing of recentWindow) {
+            const d = this.computeAdaptiveFrameDiff(existing.signature, curr.signature, SIG_DIM);
+            if (d.meanDiff < minRecentMean) minRecentMean = d.meanDiff;
+            if (d.maxRegionDiff < minRecentRegion) minRecentRegion = d.maxRegionDiff;
+          }
+
+          if (
+            !isSignificantChange &&
+            minRecentMean < DUPLICATE_MEAN_THRESHOLD * 1.25 &&
+            minRecentRegion < DUPLICATE_REGION_THRESHOLD * 1.25
+          ) {
+            continue;
+          }
+
+          candidates.push({
+            ...curr,
+            distinctionScore: isSignificantChange
+              ? diffFromLast.combinedScore
+              : diffFromLast.combinedScore * 0.75,
+          });
+        }
+      }
+
+      // 4. Enforce 30-frame safety ceiling by prioritizing the most visually distinct moments
+      const totalCandidateChanges = candidates.length;
+      const samplingLimitReached = totalCandidateChanges > MAX_VISUAL_FRAMES;
+      let selectedCandidates = candidates;
+      let warning: string | null = null;
+
+      if (samplingLimitReached) {
+        const opening = candidates[0];
+        const remainingRanked = candidates
+          .slice(1)
+          .sort((a, b) => b.distinctionScore - a.distinctionScore)
+          .slice(0, MAX_VISUAL_FRAMES - 1);
+
+        selectedCandidates = [opening, ...remainingRanked].sort(
+          (a, b) => a.timestamp_seconds - b.timestamp_seconds
+        );
+
+        warning =
+          "Reached the 30-frame processing limit; prioritized the 30 most visually distinct moments across the Reel. Some rapid cuts or intermediate frames may not be sampled.";
+      }
+
+      // 5. Encode selected chronological frames as <= 960px JPEGs (< 2 MB)
+      const encodedFrames: Array<{ blob: Blob; timestamp_seconds: number }> = [];
+      for (let i = 0; i < selectedCandidates.length; i++) {
+        const cand = selectedCandidates[i];
+        try {
+          const encoded = await encodeJpegAt(cand.timestamp_seconds);
+          if (encoded) {
+            encodedFrames.push(encoded);
+          }
+        } catch (encodeErr) {
+          console.warn(
+            `[ContentAnalysisService] Skipping JPEG encode at ${cand.timestamp_seconds}s:`,
+            encodeErr
+          );
+        }
+      }
+
+      // Guarantee at least 1 valid frame on edge-case videos if adaptive pass yielded none
+      if (encodedFrames.length === 0) {
         try {
           const midTarget = Number((safeDuration * 0.5).toFixed(2));
-          const fallback = await seekAndCapture(midTarget);
+          const fallback = await encodeJpegAt(midTarget);
           if (fallback) {
-            acceptedFrames.push(fallback);
+            encodedFrames.push(fallback);
           }
         } catch {
           // Handled below
         }
       }
 
-      if (acceptedFrames.length === 0) {
+      if (encodedFrames.length === 0) {
         throw new Error(
           "No valid representative video frames could be extracted from your Reel."
         );
       }
 
-      return acceptedFrames
+      const finalFrames = encodedFrames
         .sort((a, b) => a.timestamp_seconds - b.timestamp_seconds)
-        .slice(0, MAX_FRAMES)
-        .map(({ blob, timestamp_seconds }) => ({ blob, timestamp_seconds }));
+        .slice(0, MAX_VISUAL_FRAMES);
+
+      return {
+        frames: finalFrames,
+        samplingLimitReached,
+        totalCandidateChanges,
+        scannedSamples: rawSamples.length,
+        warning,
+      };
     } finally {
+      sigCanvas.width = 0;
+      sigCanvas.height = 0;
+      encodeCanvas.width = 0;
+      encodeCanvas.height = 0;
       URL.revokeObjectURL(objectUrl);
       video.pause();
       video.removeAttribute("src");
@@ -1185,8 +1354,9 @@ class ContentAnalysisService {
   }
 
   /**
-   * Uploads up to 8 extracted JPEG frames to private visual-analysis-frames bucket
-   * using exact 1-indexed path format: {userId}/{analysisId}/frame-{index}.jpg (1..8).
+   * Uploads adaptively selected JPEG frames (up to 30 safety ceiling) to private
+   * visual-analysis-frames bucket using exact 1-indexed paths:
+   * {userId}/{analysisId}/frame-{index}.jpg.
    * Continues with remaining valid frames if an individual frame fails, and throws if none succeed.
    */
   public async uploadAnalysisFrames(
@@ -1202,7 +1372,7 @@ class ContentAnalysisService {
       throw new Error("No extracted frames available to upload.");
     }
 
-    const framesToUpload = frames.slice(0, 8);
+    const framesToUpload = frames.slice(0, 30);
     const framePaths: FramePathItem[] = [];
 
     for (let i = 0; i < framesToUpload.length; i++) {
@@ -1212,7 +1382,7 @@ class ContentAnalysisService {
         continue;
       }
 
-      const frameIndex = framePaths.length + 1; // 1 through 8
+      const frameIndex = framePaths.length + 1; // Sequential 1..30
       const storagePath = `${userId}/${analysisId}/frame-${frameIndex}.jpg`;
 
       const { data, error } = await supabase.storage
@@ -1277,7 +1447,7 @@ class ContentAnalysisService {
 
       const validFrames = Array.isArray(framePaths)
         ? framePaths
-            .slice(0, 8)
+            .slice(0, 30)
             .filter(
               (fp) =>
                 Boolean(fp?.path) &&
@@ -1288,6 +1458,10 @@ class ContentAnalysisService {
                 Number.isFinite(fp.timestamp_seconds) &&
                 fp.timestamp_seconds >= 0
             )
+            .map((fp) => ({
+              path: fp.path,
+              timestamp_seconds: fp.timestamp_seconds,
+            }))
         : [];
 
       if (validFrames.length === 0) {

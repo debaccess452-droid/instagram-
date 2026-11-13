@@ -106,6 +106,8 @@ export const ContentAnalysisPage: React.FC = () => {
   const [submittedVisualFrames, setSubmittedVisualFrames] = useState<{
     recordId: string;
     frames: FramePathItem[];
+    samplingLimitReached: boolean;
+    samplingWarning: string | null;
   } | null>(null);
   const [isExtractingText, setIsExtractingText] = useState<boolean>(false);
   const [isPreparingTextFrames, setIsPreparingTextFrames] = useState<boolean>(false);
@@ -552,13 +554,24 @@ export const ContentAnalysisPage: React.FC = () => {
       // Abort safely if user switched to a different Reel while downloading
       if (activeVisualRunIdRef.current !== targetRecord.id) return;
 
-      // 4. Extract up to 8 representative JPEG frames across the full Reel duration
-      setVisualProgressMessage("Extracting up to 8 representative frames...");
-      const extractedFrames = await contentAnalysisService.extractVisualAnalysisFrames(
+      // 4. Adaptive, scene-aware frame sampling across the full Reel duration (up to 30-frame safety ceiling)
+      setVisualProgressMessage("Detecting visual changes...");
+      const extractionResult = await contentAnalysisService.extractVisualAnalysisFrames(
         videoBlob,
-        authoritativeDuration
+        authoritativeDuration,
+        {
+          onProgress: (stage) => {
+            if (activeVisualRunIdRef.current !== targetRecord.id) return;
+            if (stage === "detecting") {
+              setVisualProgressMessage("Detecting visual changes...");
+            } else if (stage === "selecting") {
+              setVisualProgressMessage("Selecting representative frames...");
+            }
+          },
+        }
       );
 
+      const extractedFrames = extractionResult.frames;
       if (!extractedFrames || extractedFrames.length === 0) {
         throw new Error(
           "No representative frames could be extracted from your Reel. Visual analysis was not started."
@@ -567,8 +580,8 @@ export const ContentAnalysisPage: React.FC = () => {
 
       if (activeVisualRunIdRef.current !== targetRecord.id) return;
 
-      // 5. Upload frames to private visual-analysis-frames bucket ({userId}/{analysisId}/frame-1..8.jpg)
-      setVisualProgressMessage(`Uploading ${extractedFrames.length} visual frames...`);
+      // 5. Upload selected frames to private visual-analysis-frames bucket ({userId}/{analysisId}/frame-{index}.jpg)
+      setVisualProgressMessage(`Uploading selected frames (${extractedFrames.length})...`);
       const framePaths = await contentAnalysisService.uploadAnalysisFrames(
         userId,
         targetRecord.id,
@@ -590,7 +603,7 @@ export const ContentAnalysisPage: React.FC = () => {
       }
 
       // 6. Invoke analyze-visual reusing existing analysisId and validated framePaths manifest
-      setVisualProgressMessage(`Starting visual analysis (${framePaths.length} frames)...`);
+      setVisualProgressMessage(`Queueing visual analysis (${framePaths.length} frames)...`);
       const result = await contentAnalysisService.analyzeVisual(targetRecord.id, framePaths);
 
       if (activeVisualRunIdRef.current !== targetRecord.id) {
@@ -604,7 +617,12 @@ export const ContentAnalysisPage: React.FC = () => {
       if (result.success) {
         // Backend accepted the request; keep uploaded frames in storage for worker/Groq fallback
         uploadedPathsForCleanup = [];
-        setSubmittedVisualFrames({ recordId: targetRecord.id, frames: framePaths });
+        setSubmittedVisualFrames({
+          recordId: targetRecord.id,
+          frames: framePaths,
+          samplingLimitReached: extractionResult.samplingLimitReached,
+          samplingWarning: extractionResult.warning,
+        });
 
         setPreparingVisualFramesState(false);
         setVisualProgressMessage(null);
@@ -2017,6 +2035,11 @@ export const ContentAnalysisPage: React.FC = () => {
                         submittedVisualFrames?.recordId === realAudioRecord.id
                           ? submittedVisualFrames.frames
                           : []
+                      }
+                      samplingWarning={
+                        submittedVisualFrames?.recordId === realAudioRecord.id
+                          ? submittedVisualFrames.samplingWarning
+                          : null
                       }
                       onSeek={handleSeekVideo}
                     />

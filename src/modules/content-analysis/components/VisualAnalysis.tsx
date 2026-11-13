@@ -44,6 +44,7 @@ export interface VisualAnalysisProps {
   isProcessing?: boolean;
   progressStepMessage?: string | null;
   submittedFrames?: FramePathItem[];
+  samplingWarning?: string | null;
 }
 
 /**
@@ -118,6 +119,7 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
   isProcessing = false,
   progressStepMessage,
   submittedFrames = [],
+  samplingWarning = null,
 }) => {
   const [copiedSceneId, setCopiedSceneId] = useState<string | number | null>(null);
   const [copiedAll, setCopiedAll] = useState(false);
@@ -144,36 +146,57 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
       (isBackendActiveStatus && !isFailedStatus));
 
   if (showActiveProgress) {
+    const progressLower = (progressStepMessage || "").toLowerCase();
+    const activeStageIndex = progressStepMessage
+      ? progressLower.includes("queue")
+        ? 3
+        : progressLower.includes("upload")
+        ? 2
+        : progressLower.includes("select")
+        ? 1
+        : 0
+      : isQueuedStatus
+      ? 3
+      : 4;
+
+    const pipelineStages = [
+      "Detecting visual changes",
+      "Selecting representative frames",
+      "Uploading selected frames",
+      "Queued",
+      "Processing",
+    ];
+
     const activeHeading =
       progressStepMessage ||
       (isGroqFallbackStage
-        ? "Groq fallback is analyzing extracted frames..."
+        ? "Processing (Groq fallback analyzing selected frames)..."
         : isQueuedStatus
-        ? "Visual analysis queued..."
-        : "Gemini is analyzing your Reel...");
+        ? "Queued for visual analysis..."
+        : "Processing visual analysis...");
 
     const activeDescription = progressStepMessage
-      ? "Preparing representative video frames from your uploaded Reel before queueing analysis."
+      ? "Running adaptive, scene-aware frame sampling across your uploaded Reel before queueing backend analysis."
       : isGroqFallbackStage
-      ? "Using the extracted representative frames to analyze visible scenes, subjects, and on-screen details."
+      ? "Using the adaptively selected representative frames to analyze visible scenes, subjects, and on-screen details."
       : isQueuedStatus
       ? "Your Reel visual analysis job is queued in the background. Monitoring existing job status..."
       : "Observing scenes, camera framing, visible subjects, transitions, and on-screen text from your uploaded Reel.";
 
     const activeFooterLabel = progressStepMessage
-      ? "Preparing visual frames in browser"
+      ? "Analyzing video progressively in browser"
       : isGroqFallbackStage
-      ? "Groq fallback active • Checking status every 5 seconds"
+      ? "Groq fallback processing • Checking status every 5 seconds"
       : isQueuedStatus
-      ? "Job queued • Checking status every 5 seconds"
-      : "Processing in background • Checking status every 5 seconds";
+      ? "Queued • Checking status every 5 seconds"
+      : "Processing • Checking status every 5 seconds";
 
     return (
-      <div className="rounded-2xl border border-primary/30 bg-card p-8 sm:p-12 shadow-card text-center space-y-4">
+      <div className="rounded-2xl border border-primary/30 bg-card p-8 sm:p-12 shadow-card text-center space-y-5">
         <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-primary/10 border border-primary/20 text-primary mx-auto">
           <Loader2 className="h-8 w-8 animate-spin" />
         </div>
-        <div className="max-w-md mx-auto space-y-2">
+        <div className="max-w-lg mx-auto space-y-2">
           <h3 className="text-lg font-bold text-text-primary">
             {activeHeading}
           </h3>
@@ -184,12 +207,41 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
             <span className="h-2 w-2 rounded-full bg-primary animate-pulse" />
             <span>{activeFooterLabel}</span>
           </div>
+
+          {/* 5-Stage Pipeline Progress */}
+          <div className="pt-3 flex flex-wrap items-center justify-center gap-1.5">
+            {pipelineStages.map((stageLabel, idx) => {
+              const isDone = idx < activeStageIndex;
+              const isCurrent = idx === activeStageIndex;
+              return (
+                <span
+                  key={stageLabel}
+                  className={cn(
+                    "rounded-md px-2 py-1 text-[10px] font-mono border transition-colors",
+                    isCurrent
+                      ? "bg-primary/15 text-primary border-primary/40 font-semibold"
+                      : isDone
+                      ? "bg-success/10 text-success border-success/25"
+                      : "bg-background-elevated text-text-muted border-card-border"
+                  )}
+                >
+                  {idx + 1}. {stageLabel}
+                </span>
+              );
+            })}
+          </div>
+
           {!progressStepMessage && submittedFrames.length > 0 && (
             <div className="pt-3 mt-2 border-t border-card-border/60 space-y-2">
               <p className="text-[11px] font-semibold text-text-secondary">
-                {submittedFrames.length} representative{" "}
-                {submittedFrames.length === 1 ? "frame" : "frames"} submitted for fallback readiness
+                {submittedFrames.length} adaptive representative{" "}
+                {submittedFrames.length === 1 ? "frame" : "frames"} uploaded & submitted
               </p>
+              {samplingWarning && (
+                <p className="text-[11px] text-warning bg-warning/10 border border-warning/25 rounded-md px-3 py-1.5 text-left">
+                  {samplingWarning}
+                </p>
+              )}
               <div className="flex flex-wrap items-center justify-center gap-1.5">
                 {submittedFrames.map((f, idx) => (
                   <span
@@ -257,7 +309,8 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
           </h3>
           <p className="text-xs text-text-secondary leading-relaxed">
             Your Reel is stored in private Supabase Storage. Run the Visual Analysis pipeline
-            (Gemini primary full-video analysis, with up to 8 representative frames extracted for Groq fallback readiness)
+            (Gemini primary full-video analysis, with adaptive scene-aware frame sampling up to a
+            30-frame safety ceiling for Groq fallback readiness)
             to observe scenes, camera framing, subject actions, lighting, transitions, and on-screen text.
           </p>
         </div>
@@ -410,6 +463,13 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
         ? metadata.frames_submitted
         : 0;
 
+    const resolvedSamplingWarning =
+      samplingWarning ||
+      metadata.sampling_warning ||
+      (metadata.sampling_limit_reached || resolvedFrameCount >= 30
+        ? "Reached the 30-frame safety ceiling; prioritized the most visually distinct moments. Some rapid cuts or intermediate visual moments may not be sampled."
+        : null);
+
     return (
       <div className="space-y-6">
         {/* Real Backend Evidence Banner */}
@@ -436,7 +496,12 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
           <div className="flex items-center gap-2 flex-wrap">
             {resolvedFrameCount > 0 && (
               <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-background-elevated text-text-secondary border border-card-border font-semibold">
-                {resolvedFrameCount} {resolvedFrameCount === 1 ? "Frame" : "Frames"} Submitted
+                {resolvedFrameCount} {resolvedFrameCount === 1 ? "Frame" : "Frames"} Selected
+              </span>
+            )}
+            {resolvedSamplingWarning && (
+              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-warning/15 text-warning border border-warning/30 font-semibold">
+                30-Frame Ceiling Reached
               </span>
             )}
             {isGroqFallbackResult ? (
@@ -942,7 +1007,7 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
             <div className="rounded-lg bg-background-elevated/70 p-3.5 border border-card-border space-y-2">
               <div className="flex items-center justify-between gap-2 flex-wrap">
                 <span className="text-[10px] font-semibold text-text-muted uppercase tracking-wider">
-                  Submitted Representative Frames ({resolvedFrameCount} of up to 8 max)
+                  Adaptively Selected Frames ({resolvedFrameCount} selected · max 30 safety ceiling)
                 </span>
                 <span className="text-[11px] font-mono text-text-muted">
                   Click any timestamp to seek video
@@ -967,30 +1032,44 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
                 </div>
               ) : (
                 <p className="text-xs text-text-secondary">
-                  {resolvedFrameCount} representative{" "}
-                  {resolvedFrameCount === 1 ? "frame was" : "frames were"} submitted for visual fallback coverage.
+                  {resolvedFrameCount} adaptive representative{" "}
+                  {resolvedFrameCount === 1 ? "frame was" : "frames were"} selected and submitted for visual fallback coverage.
                 </p>
               )}
+            </div>
+          )}
+
+          {resolvedSamplingWarning && (
+            <div className="rounded-lg bg-warning/10 border border-warning/30 p-3.5 text-xs text-text-primary flex items-start gap-2.5">
+              <AlertTriangle className="h-4 w-4 text-warning shrink-0 mt-0.5" />
+              <div className="space-y-0.5">
+                <span className="font-semibold text-warning block">
+                  Sampling Ceiling Reached (30 Frames)
+                </span>
+                <p className="text-text-secondary leading-relaxed">
+                  {resolvedSamplingWarning}
+                </p>
+              </div>
             </div>
           )}
 
           <div className="rounded-lg bg-background-elevated/60 p-3.5 text-xs leading-relaxed text-text-secondary border border-card-border space-y-2">
             <p>
               <strong className="text-text-primary">Provider Scope: </strong>
-              Gemini remains the primary full-video analysis provider. Groq serves as a fallback provider that analyzes only the submitted representative frames (up to 8 frames) and is never a complete full-video analysis.
+              Gemini remains the primary full-video analysis provider. Groq serves as a fallback provider that analyzes only the adaptively selected representative frames (up to the 30-frame safety ceiling) and is never a complete full-video analysis.
             </p>
             <p>
-              <strong className="text-text-primary">Sampling Limitation: </strong>
+              <strong className="text-text-primary">Adaptive Sampling Limitation: </strong>
               {isGroqFallbackResult
                 ? "This result was produced by Groq fallback from the submitted representative frames only. "
                 : typeof metadata.frame_sampling_fps === "number" &&
                   metadata.frame_sampling_fps > 0
                 ? `Primary visual analysis sampled the video at ${metadata.frame_sampling_fps} FPS. `
                 : ""}
-              Even 8 representative frames cannot guarantee detection of every rapid cut, brief on-screen text, or visual event occurring between sampled timestamps.
+              Adaptive sampling targets visual changes (scene cuts, outfit/background shifts, framing changes, and text overlays) rather than capturing every video frame; rapid flashes or brief events between sampled timestamps may not be captured.
             </p>
             <p className="text-[11px] text-text-muted">
-              Technical hardware specifications (e.g. camera models, lens focal lengths, physical lighting rigs) are intentionally not inferred to preserve strict empirical observation.
+              Evidence & accuracy policy: Scene timestamps remain chronological and transitions between unsampled frames are not fabricated. Technical camera hardware, lens specs, lighting gear, unidentifiable people, and unreadable text are never invented.
             </p>
           </div>
 

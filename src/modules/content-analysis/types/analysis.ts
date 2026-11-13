@@ -409,6 +409,8 @@ export interface VisualBackendMetadata {
   submitted_frames?: FramePathItem[];
   frame_paths?: FramePathItem[];
   frame_timestamps?: number[];
+  sampling_limit_reached?: boolean;
+  sampling_warning?: string;
   is_demo_data?: boolean;
   analyzed_at?: string;
 }

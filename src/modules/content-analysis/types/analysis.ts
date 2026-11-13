@@ -325,6 +325,8 @@ export interface AudioBackendResult {
   }>;
   analysis_metadata: {
     warnings: string[];
+    provider?: string;
+    model?: string;
   };
 }
 
@@ -462,6 +464,77 @@ export interface TextExtractionBackendResult {
 }
 
 /**
+ * Status of the original reel script generation pipeline in Supabase
+ */
+export type OriginalScriptStatus =
+  | "pending"
+  | "processing"
+  | "queued"
+  | "completed"
+  | "failed"
+  | (string & {});
+
+export interface OriginalScriptBackendRow {
+  time: string;
+  time_start_seconds?: number | null;
+  time_end_seconds?: number | null;
+  original_voiceover_audio?: string | null;
+  exact_on_screen_text?: string | null;
+  detailed_visual_direction?: string | null;
+}
+
+export interface OriginalScriptSourceInfo {
+  provider?: string | null;
+  model?: string | null;
+  status?: string | null;
+}
+
+export interface OriginalScriptBackendMetadata {
+  warnings?: string[];
+  synchronization_method?: string | null;
+  sync_method?: string | null;
+  method?: string | null;
+  analysis_notes?: string | string[] | null;
+  notes?: string | string[] | null;
+  audio_provider?: string | null;
+  audio_model?: string | null;
+  visual_provider?: string | null;
+  visual_model?: string | null;
+  text_provider?: string | null;
+  text_model?: string | null;
+  text_extraction_provider?: string | null;
+  text_extraction_model?: string | null;
+  sources?: {
+    audio?: OriginalScriptSourceInfo;
+    visual?: OriginalScriptSourceInfo;
+    text?: OriginalScriptSourceInfo;
+    text_extraction?: OriginalScriptSourceInfo;
+  };
+  source_models?: {
+    audio?: OriginalScriptSourceInfo;
+    visual?: OriginalScriptSourceInfo;
+    text?: OriginalScriptSourceInfo;
+    text_extraction?: OriginalScriptSourceInfo;
+  };
+  analyzed_at?: string;
+  generated_at?: string;
+}
+
+/**
+ * Exact response structure returned by the generate-original-script Supabase Edge Function
+ */
+export interface OriginalScriptBackendResult {
+  rows: OriginalScriptBackendRow[];
+  analysis_metadata?: OriginalScriptBackendMetadata;
+}
+
+export interface OriginalScriptSourceStatuses {
+  audio?: string | null;
+  visual?: string | null;
+  text?: string | null;
+}
+
+/**
  * Database record matching public.content_analyses table in Supabase.
  */
 export interface ContentAnalysisRecord {
@@ -498,6 +571,13 @@ export interface ContentAnalysisRecord {
   text_extraction_error?: string | null;
   text_extraction_started_at?: string | null;
   text_extraction_completed_at?: string | null;
+
+  // Dedicated Original Reel Script columns
+  original_script?: OriginalScriptBackendResult | null;
+  original_script_status?: OriginalScriptStatus | null;
+  original_script_error?: string | null;
+  original_script_started_at?: string | null;
+  original_script_completed_at?: string | null;
 }
 
 export interface AnalysisHistoryItem {
@@ -530,6 +610,11 @@ export interface AnalysisHistoryItem {
   textExtraction?: TextExtractionBackendResult | null;
   textExtractionStatus?: TextExtractionStatus | null;
   textExtractionError?: string | null;
+
+  // Real Original Reel Script metadata
+  originalScript?: OriginalScriptBackendResult | null;
+  originalScriptStatus?: OriginalScriptStatus | null;
+  originalScriptError?: string | null;
 }
 
 export type AnalysisTabType =

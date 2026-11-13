@@ -25,6 +25,8 @@ import {
   AudioBackendResult,
   VisualAnalysisStatus,
   TextExtractionStatus,
+  OriginalScriptStatus,
+  OriginalScriptSourceStatuses,
 } from "../types/analysis";
 import { contentAnalysisService } from "../services/contentAnalysisService";
 import { supabase } from "@/lib/supabase";
@@ -104,6 +106,11 @@ export const ContentAnalysisPage: React.FC = () => {
   const [isPreparingTextFrames, setIsPreparingTextFrames] = useState<boolean>(false);
   const [textExtractionError, setTextExtractionError] = useState<string | null>(null);
   const [textProgressMessage, setTextProgressMessage] = useState<string | null>(null);
+  const [isGeneratingScript, setIsGeneratingScript] = useState<boolean>(false);
+  const [originalScriptError, setOriginalScriptError] = useState<string | null>(null);
+  const [originalScriptErrorCode, setOriginalScriptErrorCode] = useState<string | null>(null);
+  const [originalScriptIncompleteSources, setOriginalScriptIncompleteSources] =
+    useState<OriginalScriptSourceStatuses | null>(null);
 
   const [activeTab, setActiveTabState] = useState<AnalysisTabType>(getInitialActiveTab);
   const setActiveTab = (tab: AnalysisTabType) => {
@@ -134,6 +141,9 @@ export const ContentAnalysisPage: React.FC = () => {
   const textPollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const activeTextRunIdRef = useRef<string | null>(null);
   const isPreparingTextFramesRef = useRef<boolean>(false);
+  const scriptPollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const activeScriptRunIdRef = useRef<string | null>(null);
+  const isGeneratingScriptRef = useRef<boolean>(false);
   const selectionRequestIdRef = useRef<number>(0);
 
   const setPreparingVisualFramesState = (value: boolean) => {
@@ -157,6 +167,13 @@ export const ContentAnalysisPage: React.FC = () => {
     if (textPollingRef.current) {
       clearInterval(textPollingRef.current);
       textPollingRef.current = null;
+    }
+  };
+
+  const stopScriptPolling = () => {
+    if (scriptPollingRef.current) {
+      clearInterval(scriptPollingRef.current);
+      scriptPollingRef.current = null;
     }
   };
 
@@ -230,16 +247,56 @@ export const ContentAnalysisPage: React.FC = () => {
       setTextProgressMessage(null);
       setTextExtractionError(null);
     }
+
+    const sStatus = normalizeVisualStatus(record.original_script_status);
+    const hasSavedScript = Boolean(record.original_script);
+
+    if (sStatus === "completed" || (hasSavedScript && sStatus !== "failed")) {
+      stopScriptPolling();
+      activeScriptRunIdRef.current = null;
+      isGeneratingScriptRef.current = false;
+      setIsGeneratingScript(false);
+      setOriginalScriptError(null);
+      setOriginalScriptErrorCode(null);
+      setOriginalScriptIncompleteSources(null);
+    } else if (sStatus === "processing" || sStatus === "queued") {
+      isGeneratingScriptRef.current = false;
+      setIsGeneratingScript(true);
+      setOriginalScriptError(null);
+      setOriginalScriptErrorCode(null);
+      setOriginalScriptIncompleteSources(null);
+    } else if (sStatus === "failed") {
+      stopScriptPolling();
+      activeScriptRunIdRef.current = null;
+      isGeneratingScriptRef.current = false;
+      setIsGeneratingScript(false);
+      setOriginalScriptError(
+        record.original_script_error || "Previous Original Reel Script generation failed."
+      );
+      setOriginalScriptErrorCode(null);
+      setOriginalScriptIncompleteSources(null);
+    } else {
+      stopScriptPolling();
+      activeScriptRunIdRef.current = null;
+      isGeneratingScriptRef.current = false;
+      setIsGeneratingScript(false);
+      setOriginalScriptError(null);
+      setOriginalScriptErrorCode(null);
+      setOriginalScriptIncompleteSources(null);
+    }
   };
 
   useEffect(() => {
     return () => {
       stopVisualPolling();
       stopTextPolling();
+      stopScriptPolling();
       activeVisualRunIdRef.current = null;
       activeTextRunIdRef.current = null;
+      activeScriptRunIdRef.current = null;
       isPreparingVisualFramesRef.current = false;
       isPreparingTextFramesRef.current = false;
+      isGeneratingScriptRef.current = false;
     };
   }, []);
 
@@ -298,18 +355,25 @@ export const ContentAnalysisPage: React.FC = () => {
   const handleUploadSuccess = (record: ContentAnalysisRecord) => {
     stopVisualPolling();
     stopTextPolling();
+    stopScriptPolling();
     activeVisualRunIdRef.current = null;
     activeTextRunIdRef.current = null;
+    activeScriptRunIdRef.current = null;
+    isGeneratingScriptRef.current = false;
     setPreparingVisualFramesState(false);
     setPreparingTextFramesState(false);
     setIsAnalyzingVisual(false);
     setIsExtractingText(false);
+    setIsGeneratingScript(false);
     setVisualProgressMessage(null);
     setTextProgressMessage(null);
     setRealAudioRecord(record);
     setAudioAnalysisError(null);
     setVisualAnalysisError(null);
     setTextExtractionError(null);
+    setOriginalScriptError(null);
+    setOriginalScriptErrorCode(null);
+    setOriginalScriptIncompleteSources(null);
     localStorage.setItem(ACTIVE_ANALYSIS_STORAGE_KEY, record.id);
 
     const newItem = contentAnalysisService.mapRecordToHistoryItem(record);
@@ -1106,6 +1170,364 @@ export const ContentAnalysisPage: React.FC = () => {
     isPreparingTextFrames,
   ]);
 
+  // 11. Independent Original Reel Script generation via 'generate-original-script' (explicit action only)
+  const handleGenerateOriginalScript = async (
+    recordToGenerate?: ContentAnalysisRecord | null
+  ) => {
+    const targetRecord = recordToGenerate || realAudioRecord;
+    if (!targetRecord?.id) return;
+
+    // Never regenerate an already-completed script with saved result
+    const initialStatus = normalizeVisualStatus(targetRecord.original_script_status);
+    if (initialStatus === "completed" && targetRecord.original_script) {
+      hydrateRealRecordState(targetRecord);
+      setCurrentAnalysis(null);
+      setIsUploadMode(false);
+      setActiveTab("script");
+      return;
+    }
+
+    // Synchronous ref lock prevents duplicate runs across repeated clicks or React Strict Mode
+    if (
+      activeScriptRunIdRef.current === targetRecord.id ||
+      isGeneratingScriptRef.current ||
+      isGeneratingScript
+    ) {
+      return;
+    }
+
+    activeScriptRunIdRef.current = targetRecord.id;
+    isGeneratingScriptRef.current = true;
+    stopScriptPolling();
+    setIsGeneratingScript(true);
+    setOriginalScriptError(null);
+    setOriginalScriptErrorCode(null);
+    setOriginalScriptIncompleteSources(null);
+    localStorage.setItem(ACTIVE_ANALYSIS_STORAGE_KEY, targetRecord.id);
+
+    setCurrentAnalysis(null);
+    setIsUploadMode(false);
+    setActiveTab("script");
+
+    try {
+      // 1. Confirm user is authenticated
+      const {
+        data: { session },
+        error: sessionError,
+      } = await supabase.auth.getSession();
+
+      if (sessionError || !session?.user) {
+        throw new Error(
+          "Authentication required: Please sign in to generate the Original Reel Script."
+        );
+      }
+
+      // 2. Load latest content_analyses record before invoking
+      const freshDbRecord = await contentAnalysisService.fetchAnalysisById(targetRecord.id);
+      if (activeScriptRunIdRef.current !== targetRecord.id) return;
+
+      const authoritativeRecord = freshDbRecord || targetRecord;
+      const dbScriptStatus = normalizeVisualStatus(
+        authoritativeRecord.original_script_status
+      );
+
+      if (dbScriptStatus === "completed" && authoritativeRecord.original_script) {
+        hydrateRealRecordState(authoritativeRecord);
+        const updatedItem = contentAnalysisService.mapRecordToHistoryItem(authoritativeRecord);
+        setHistoryItems((prev) => [
+          updatedItem,
+          ...prev.filter((p) => p.id !== authoritativeRecord.id),
+        ]);
+        return;
+      }
+
+      if (dbScriptStatus === "processing" || dbScriptStatus === "queued") {
+        hydrateRealRecordState(authoritativeRecord);
+        const updatedItem = contentAnalysisService.mapRecordToHistoryItem(authoritativeRecord);
+        setHistoryItems((prev) => [
+          updatedItem,
+          ...prev.filter((p) => p.id !== authoritativeRecord.id),
+        ]);
+        return;
+      }
+
+      // 3. Verify all three source analyses are completed before invoking Edge Function
+      const audioCompleted =
+        normalizeVisualStatus(authoritativeRecord.audio_analysis_status) === "completed";
+      const visualCompleted =
+        normalizeVisualStatus(authoritativeRecord.visual_analysis_status) === "completed";
+      const textCompleted =
+        normalizeVisualStatus(authoritativeRecord.text_extraction_status) === "completed";
+
+      if (!audioCompleted || !visualCompleted || !textCompleted) {
+        hydrateRealRecordState(authoritativeRecord);
+        setOriginalScriptErrorCode("SOURCE_ANALYSES_INCOMPLETE");
+        setOriginalScriptIncompleteSources({
+          audio: authoritativeRecord.audio_analysis_status || "pending",
+          visual: authoritativeRecord.visual_analysis_status || "pending",
+          text: authoritativeRecord.text_extraction_status || "pending",
+        });
+        setOriginalScriptError(
+          "All three source analyses (Audio Analysis, Visual Analysis, and Text Extraction) must be completed before generating the Original Reel Script."
+        );
+        return;
+      }
+
+      // 4. Invoke deployed Supabase Edge Function 'generate-original-script'
+      const result = await contentAnalysisService.generateOriginalScript(targetRecord.id);
+      if (activeScriptRunIdRef.current !== targetRecord.id) return;
+
+      if (result.success) {
+        isGeneratingScriptRef.current = false;
+        const newStatus: OriginalScriptStatus =
+          result.status || (result.original_script ? "completed" : "processing");
+
+        if (normalizeVisualStatus(newStatus) === "completed" || result.original_script) {
+          const completedRecord = await contentAnalysisService.fetchAnalysisById(targetRecord.id);
+          if (activeScriptRunIdRef.current !== targetRecord.id) return;
+
+          const resolvedRecord: ContentAnalysisRecord = completedRecord || {
+            ...authoritativeRecord,
+            original_script: result.original_script || authoritativeRecord.original_script,
+            original_script_status: "completed",
+            original_script_error: null,
+          };
+
+          hydrateRealRecordState(resolvedRecord);
+          const updatedItem = contentAnalysisService.mapRecordToHistoryItem(resolvedRecord);
+          setHistoryItems((prev) => [
+            updatedItem,
+            ...prev.filter((p) => p.id !== resolvedRecord.id),
+          ]);
+        } else {
+          setRealAudioRecord((prev) =>
+            prev && prev.id === targetRecord.id
+              ? {
+                  ...prev,
+                  original_script_status: newStatus,
+                  original_script_error: null,
+                }
+              : prev
+          );
+
+          setHistoryItems((prev) =>
+            prev.map((item) =>
+              item.id === targetRecord.id
+                ? { ...item, originalScriptStatus: newStatus, originalScriptError: null }
+                : item
+            )
+          );
+        }
+      } else {
+        activeScriptRunIdRef.current = null;
+        isGeneratingScriptRef.current = false;
+        setIsGeneratingScript(false);
+
+        const errorMsg =
+          result.error || "Original Reel Script generation was unable to complete.";
+
+        if (result.code === "SOURCE_ANALYSES_INCOMPLETE") {
+          setOriginalScriptErrorCode("SOURCE_ANALYSES_INCOMPLETE");
+          setOriginalScriptIncompleteSources(
+            result.sourceStatuses || {
+              audio: authoritativeRecord.audio_analysis_status || "pending",
+              visual: authoritativeRecord.visual_analysis_status || "pending",
+              text: authoritativeRecord.text_extraction_status || "pending",
+            }
+          );
+          setOriginalScriptError(errorMsg);
+        } else {
+          setOriginalScriptErrorCode(result.code || null);
+          setOriginalScriptIncompleteSources(null);
+          setOriginalScriptError(errorMsg);
+
+          setRealAudioRecord((prev) =>
+            prev && prev.id === targetRecord.id
+              ? {
+                  ...prev,
+                  original_script_status: "failed",
+                  original_script_error: errorMsg,
+                }
+              : prev
+          );
+
+          setHistoryItems((prev) =>
+            prev.map((item) =>
+              item.id === targetRecord.id
+                ? {
+                    ...item,
+                    originalScriptStatus: "failed",
+                    originalScriptError: errorMsg,
+                  }
+                : item
+            )
+          );
+        }
+      }
+    } catch (err: any) {
+      if (activeScriptRunIdRef.current !== targetRecord.id) return;
+      const msg =
+        err.message ||
+        "An unexpected error occurred while generating the Original Reel Script.";
+      activeScriptRunIdRef.current = null;
+      isGeneratingScriptRef.current = false;
+      setIsGeneratingScript(false);
+      setOriginalScriptErrorCode(null);
+      setOriginalScriptIncompleteSources(null);
+      setOriginalScriptError(msg);
+
+      setRealAudioRecord((prev) =>
+        prev && prev.id === targetRecord.id
+          ? {
+              ...prev,
+              original_script_status: "failed",
+              original_script_error: msg,
+            }
+          : prev
+      );
+
+      setHistoryItems((prev) =>
+        prev.map((item) =>
+          item.id === targetRecord.id
+            ? {
+                ...item,
+                originalScriptStatus: "failed",
+                originalScriptError: msg,
+              }
+            : item
+        )
+      );
+    }
+  };
+
+  // 12. Retry Original Reel Script generation (only used after failed generation)
+  const handleRetryOriginalScript = () => {
+    if (realAudioRecord) {
+      handleGenerateOriginalScript(realAudioRecord);
+    }
+  };
+
+  // 13. Poll existing content_analyses record every 5 seconds when original script is processing
+  useEffect(() => {
+    const currentRecordId = realAudioRecord?.id;
+    const normalizedStatus = normalizeVisualStatus(realAudioRecord?.original_script_status);
+
+    if (
+      !currentRecordId ||
+      (normalizedStatus !== "processing" && normalizedStatus !== "queued")
+    ) {
+      stopScriptPolling();
+      return;
+    }
+
+    let isCancelled = false;
+    stopScriptPolling();
+
+    const poll = async () => {
+      try {
+        const statusData = await contentAnalysisService.pollOriginalScriptStatus(
+          currentRecordId
+        );
+        if (isCancelled || !statusData) return;
+
+        const polledStatus = normalizeVisualStatus(statusData.original_script_status);
+
+        if (polledStatus === "completed") {
+          stopScriptPolling();
+          activeScriptRunIdRef.current = null;
+          isGeneratingScriptRef.current = false;
+          setIsGeneratingScript(false);
+          setOriginalScriptError(null);
+          setOriginalScriptErrorCode(null);
+          setOriginalScriptIncompleteSources(null);
+
+          const freshRecord = await contentAnalysisService.fetchAnalysisById(currentRecordId);
+          if (isCancelled) return;
+
+          if (freshRecord) {
+            hydrateRealRecordState(freshRecord);
+            const updatedHistoryItem =
+              contentAnalysisService.mapRecordToHistoryItem(freshRecord);
+            setHistoryItems((prev) => [
+              updatedHistoryItem,
+              ...prev.filter((p) => p.id !== freshRecord.id),
+            ]);
+          } else if (statusData.original_script) {
+            setRealAudioRecord((prev) =>
+              prev && prev.id === currentRecordId
+                ? {
+                    ...prev,
+                    original_script: statusData.original_script,
+                    original_script_status: "completed",
+                    original_script_error: null,
+                    original_script_started_at:
+                      statusData.original_script_started_at ??
+                      prev.original_script_started_at,
+                    original_script_completed_at:
+                      statusData.original_script_completed_at ??
+                      prev.original_script_completed_at,
+                  }
+                : prev
+            );
+          }
+        } else if (polledStatus === "failed") {
+          stopScriptPolling();
+          activeScriptRunIdRef.current = null;
+          isGeneratingScriptRef.current = false;
+          setIsGeneratingScript(false);
+          const errorMsg =
+            statusData.original_script_error ||
+            "Original Reel Script generation was unable to complete.";
+          setOriginalScriptError(errorMsg);
+          setOriginalScriptErrorCode(null);
+          setOriginalScriptIncompleteSources(null);
+
+          setRealAudioRecord((prev) =>
+            prev && prev.id === currentRecordId
+              ? {
+                  ...prev,
+                  original_script_status: "failed",
+                  original_script_error: errorMsg,
+                }
+              : prev
+          );
+
+          setHistoryItems((prev) =>
+            prev.map((item) =>
+              item.id === currentRecordId
+                ? {
+                    ...item,
+                    originalScriptStatus: "failed",
+                    originalScriptError: errorMsg,
+                  }
+                : item
+            )
+          );
+        } else if (statusData.original_script_status) {
+          setRealAudioRecord((prev) =>
+            prev &&
+            prev.id === currentRecordId &&
+            prev.original_script_status !== statusData.original_script_status
+              ? {
+                  ...prev,
+                  original_script_status: statusData.original_script_status,
+                }
+              : prev
+          );
+        }
+      } catch (err) {
+        console.warn("[ContentAnalysisPage] Original script polling tick error:", err);
+      }
+    };
+
+    scriptPollingRef.current = setInterval(poll, 5000);
+
+    return () => {
+      isCancelled = true;
+      stopScriptPolling();
+    };
+  }, [realAudioRecord?.id, realAudioRecord?.original_script_status]);
+
   // 5. Sample Preset Demo handlers (preserved independently)
   const handleStartDemoAnalysis = (
     file: File | null,
@@ -1140,16 +1562,23 @@ export const ContentAnalysisPage: React.FC = () => {
     const requestId = ++selectionRequestIdRef.current;
     stopVisualPolling();
     stopTextPolling();
+    stopScriptPolling();
     activeVisualRunIdRef.current = null;
     activeTextRunIdRef.current = null;
+    activeScriptRunIdRef.current = null;
+    isGeneratingScriptRef.current = false;
     setPreparingVisualFramesState(false);
     setPreparingTextFramesState(false);
     setIsAnalyzingVisual(false);
     setIsExtractingText(false);
+    setIsGeneratingScript(false);
     setVisualProgressMessage(null);
     setTextProgressMessage(null);
     setVisualAnalysisError(null);
     setTextExtractionError(null);
+    setOriginalScriptError(null);
+    setOriginalScriptErrorCode(null);
+    setOriginalScriptIncompleteSources(null);
 
     // A. Check if selecting a demo preset
     const presets = contentAnalysisService.getPresetReels();
@@ -1185,7 +1614,12 @@ export const ContentAnalysisPage: React.FC = () => {
 
       setIsUploadMode(false);
 
-      if (activeTab !== "visual" && activeTab !== "audio" && activeTab !== "text") {
+      if (
+        activeTab !== "visual" &&
+        activeTab !== "audio" &&
+        activeTab !== "text" &&
+        activeTab !== "script"
+      ) {
         setActiveTab(record.audio_analysis_status === "completed" ? "audio" : "visual");
       }
     }
@@ -1198,14 +1632,21 @@ export const ContentAnalysisPage: React.FC = () => {
     if (realAudioRecord?.id === id) {
       stopVisualPolling();
       stopTextPolling();
+      stopScriptPolling();
       activeVisualRunIdRef.current = null;
       activeTextRunIdRef.current = null;
+      activeScriptRunIdRef.current = null;
+      isGeneratingScriptRef.current = false;
       setPreparingVisualFramesState(false);
       setPreparingTextFramesState(false);
       setIsAnalyzingVisual(false);
       setIsExtractingText(false);
+      setIsGeneratingScript(false);
       setVisualProgressMessage(null);
       setTextProgressMessage(null);
+      setOriginalScriptError(null);
+      setOriginalScriptErrorCode(null);
+      setOriginalScriptIncompleteSources(null);
       setRealAudioRecord(null);
       setSignedVideoUrl(null);
       localStorage.removeItem(ACTIVE_ANALYSIS_STORAGE_KEY);
@@ -1248,7 +1689,9 @@ export const ContentAnalysisPage: React.FC = () => {
       id: "script",
       label: "Original Reel Script",
       icon: FileSpreadsheet,
-      count: currentAnalysis?.scriptTable.length,
+      count: realAudioRecord?.original_script?.rows?.length
+        ? `${realAudioRecord.original_script.rows.length}`
+        : currentAnalysis?.scriptTable.length,
     },
     { id: "editing", label: "Editing Breakdown", icon: Scissors },
     {
@@ -1576,6 +2019,61 @@ export const ContentAnalysisPage: React.FC = () => {
                     />
                   </div>
                 </div>
+              ) : activeTab === "script" ? (
+                <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+                  {/* Left Column: Player Preview if video URL is available */}
+                  <div className="lg:col-span-4 sticky top-6">
+                    <div className="w-full max-w-sm mx-auto space-y-3">
+                      <VideoPreviewPlayer
+                        ref={playerRef}
+                        src={signedVideoUrl || undefined}
+                        durationSeconds={realAudioRecord.duration_seconds || 30}
+                        aspectRatio="9:16"
+                      />
+                      <div className="rounded-xl border border-card-border bg-card p-3 text-xs text-text-secondary space-y-1">
+                        <p className="font-semibold text-text-primary line-clamp-1">
+                          {realAudioRecord.file_name}
+                        </p>
+                        <p className="text-[11px] text-text-muted font-mono">
+                          Click any timestamp in the Original Reel Script table to jump to that moment in the video.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Right Column: Original Reel Script Results */}
+                  <div className="lg:col-span-8">
+                    <OriginalScriptTable
+                      isRealMode={true}
+                      realData={realAudioRecord.original_script}
+                      status={realAudioRecord.original_script_status}
+                      errorMessage={
+                        normalizeVisualStatus(realAudioRecord.original_script_status) ===
+                        "completed"
+                          ? null
+                          : originalScriptError || realAudioRecord.original_script_error
+                      }
+                      errorCode={originalScriptErrorCode}
+                      sourceStatuses={{
+                        audio: realAudioRecord.audio_analysis_status,
+                        visual: realAudioRecord.visual_analysis_status,
+                        text: realAudioRecord.text_extraction_status,
+                      }}
+                      incompleteSourcesError={originalScriptIncompleteSources}
+                      sourceMetadata={{
+                        audio: realAudioRecord.audio_analysis?.analysis_metadata,
+                        visual: realAudioRecord.visual_analysis?.analysis_metadata,
+                        text: realAudioRecord.text_extraction?.analysis_metadata,
+                      }}
+                      videoTitle={realAudioRecord.file_name}
+                      onGenerateScript={() => handleGenerateOriginalScript(realAudioRecord)}
+                      onRetry={handleRetryOriginalScript}
+                      isProcessing={isGeneratingScript}
+                      onSeek={handleSeekVideo}
+                      onSelectTab={setActiveTab}
+                    />
+                  </div>
+                </div>
               ) : (
                 /* Other Tabs for real uploaded Reel */
                 <div className="rounded-2xl border border-card-border bg-card p-8 sm:p-12 text-center space-y-4 shadow-card">
@@ -1588,7 +2086,7 @@ export const ContentAnalysisPage: React.FC = () => {
                     </h3>
                     <p className="text-xs text-text-secondary leading-relaxed">
                       This analysis module will be connected in subsequent steps.
-                      Real Audio, Visual Analysis, and On-Screen Text Extraction are currently connected and active for this uploaded Reel.
+                      Real Audio, Visual Analysis, On-Screen Text Extraction, and Original Reel Script are currently connected and active for this uploaded Reel.
                     </p>
                   </div>
                   <div className="pt-2 flex flex-wrap items-center justify-center gap-3">
@@ -1615,6 +2113,14 @@ export const ContentAnalysisPage: React.FC = () => {
                       leftIcon={<Type className="h-4 w-4" />}
                     >
                       View Text Extraction
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setActiveTab("script")}
+                      leftIcon={<FileSpreadsheet className="h-4 w-4" />}
+                    >
+                      View Original Reel Script
                     </Button>
                   </div>
                 </div>

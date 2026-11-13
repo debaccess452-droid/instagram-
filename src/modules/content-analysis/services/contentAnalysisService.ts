@@ -8,6 +8,9 @@ import {
   VisualAnalysisStatus,
   TextExtractionBackendResult,
   TextExtractionStatus,
+  OriginalScriptBackendResult,
+  OriginalScriptStatus,
+  OriginalScriptSourceStatuses,
   FramePathItem,
   ScriptTableRow,
   EditingTimelineEvent,
@@ -224,11 +227,30 @@ class ContentAnalysisService {
     return null;
   }
 
+  private normalizeOriginalScript(raw: unknown): OriginalScriptBackendResult | null {
+    if (!raw) return null;
+    if (typeof raw === "string") {
+      try {
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === "object"
+          ? (parsed as OriginalScriptBackendResult)
+          : null;
+      } catch {
+        return null;
+      }
+    }
+    if (typeof raw === "object") {
+      return raw as OriginalScriptBackendResult;
+    }
+    return null;
+  }
+
   private normalizeRecord(row: any): ContentAnalysisRecord {
     return {
       ...(row as ContentAnalysisRecord),
       visual_analysis: this.normalizeVisualAnalysis(row?.visual_analysis),
       text_extraction: this.normalizeTextExtraction(row?.text_extraction),
+      original_script: this.normalizeOriginalScript(row?.original_script),
     };
   }
 
@@ -1077,6 +1099,221 @@ class ContentAnalysisService {
     }
   }
 
+  private extractSourceStatusesFromPayload(
+    payload: any
+  ): OriginalScriptSourceStatuses | undefined {
+    if (!payload || typeof payload !== "object") return undefined;
+
+    const nested =
+      payload.source_statuses ||
+      payload.sourceStatuses ||
+      payload.statuses ||
+      payload.sources ||
+      null;
+
+    const audio =
+      nested?.audio ??
+      nested?.audio_analysis ??
+      nested?.audio_analysis_status ??
+      payload.audio_analysis_status ??
+      undefined;
+    const visual =
+      nested?.visual ??
+      nested?.visual_analysis ??
+      nested?.visual_analysis_status ??
+      payload.visual_analysis_status ??
+      undefined;
+    const text =
+      nested?.text ??
+      nested?.text_extraction ??
+      nested?.text_extraction_status ??
+      payload.text_extraction_status ??
+      undefined;
+
+    if (audio === undefined && visual === undefined && text === undefined) {
+      return undefined;
+    }
+
+    return {
+      audio: audio ?? null,
+      visual: visual ?? null,
+      text: text ?? null,
+    };
+  }
+
+  /**
+   * Invokes the deployed Supabase Edge Function 'generate-original-script'
+   * for the given existing analysisId using the authenticated session.
+   */
+  public async generateOriginalScript(analysisId: string): Promise<{
+    success: boolean;
+    status?: OriginalScriptStatus;
+    code?: string;
+    sourceStatuses?: OriginalScriptSourceStatuses;
+    analysisId?: string;
+    original_script?: OriginalScriptBackendResult;
+    error?: string;
+  }> {
+    try {
+      const {
+        data: { session },
+        error: sessionError,
+      } = await supabase.auth.getSession();
+
+      if (sessionError || !session?.user) {
+        return {
+          success: false,
+          error:
+            "Authentication required: Please sign in to generate the Original Reel Script.",
+        };
+      }
+
+      if (!analysisId) {
+        return {
+          success: false,
+          error: "A valid analysis record ID is required to generate the Original Reel Script.",
+        };
+      }
+
+      const { data, error } = await supabase.functions.invoke(
+        "generate-original-script",
+        {
+          body: { analysisId },
+        }
+      );
+
+      if (error) {
+        let msg = error.message;
+        let code: string | undefined;
+        let sourceStatuses: OriginalScriptSourceStatuses | undefined;
+
+        if ((error as any).context && typeof (error as any).context?.json === "function") {
+          try {
+            const body = await (error as any).context.json();
+            if (body) {
+              code =
+                body.code ||
+                body.error_code ||
+                (body.error === "SOURCE_ANALYSES_INCOMPLETE"
+                  ? "SOURCE_ANALYSES_INCOMPLETE"
+                  : undefined);
+              if (body.error && typeof body.error === "string") {
+                msg = body.error;
+              } else if (body.message && typeof body.message === "string") {
+                msg = body.message;
+              }
+              sourceStatuses = this.extractSourceStatusesFromPayload(body);
+            }
+          } catch {}
+        }
+
+        if (!code && typeof msg === "string" && msg.includes("SOURCE_ANALYSES_INCOMPLETE")) {
+          code = "SOURCE_ANALYSES_INCOMPLETE";
+        }
+
+        return {
+          success: false,
+          code,
+          sourceStatuses,
+          error: msg || "Original Reel Script generation failed.",
+        };
+      }
+
+      if (
+        data &&
+        (data.success === false ||
+          data.code === "SOURCE_ANALYSES_INCOMPLETE" ||
+          data.error_code === "SOURCE_ANALYSES_INCOMPLETE" ||
+          data.error === "SOURCE_ANALYSES_INCOMPLETE")
+      ) {
+        const code =
+          data.code ||
+          data.error_code ||
+          (data.error === "SOURCE_ANALYSES_INCOMPLETE"
+            ? "SOURCE_ANALYSES_INCOMPLETE"
+            : undefined);
+        return {
+          success: false,
+          code,
+          sourceStatuses: this.extractSourceStatusesFromPayload(data),
+          error:
+            data.message ||
+            data.error ||
+            "Source analyses must be completed before generating the Original Reel Script.",
+        };
+      }
+
+      return {
+        success: true,
+        status:
+          (data?.status as OriginalScriptStatus) ||
+          (data?.original_script ? "completed" : "processing"),
+        analysisId: data?.analysisId || analysisId,
+        original_script:
+          this.normalizeOriginalScript(data?.original_script) ?? undefined,
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        error: err.message || "Failed to invoke generate-original-script function.",
+      };
+    }
+  }
+
+  /**
+   * Polls the user's existing content_analyses record for original script status and source statuses.
+   */
+  public async pollOriginalScriptStatus(analysisId: string): Promise<{
+    original_script: OriginalScriptBackendResult | null;
+    original_script_status: OriginalScriptStatus | null;
+    original_script_error: string | null;
+    original_script_started_at: string | null;
+    original_script_completed_at: string | null;
+    audio_analysis_status?: string | null;
+    visual_analysis_status?: string | null;
+    text_extraction_status?: string | null;
+  } | null> {
+    try {
+      const {
+        data: { session },
+        error: sessionError,
+      } = await supabase.auth.getSession();
+
+      if (sessionError || !session?.user) {
+        return null;
+      }
+
+      const { data, error } = await supabase
+        .from(TABLE_CONTENT_ANALYSES)
+        .select(
+          "original_script, original_script_status, original_script_error, original_script_started_at, original_script_completed_at, audio_analysis_status, visual_analysis_status, text_extraction_status"
+        )
+        .eq("id", analysisId)
+        .eq("user_id", session.user.id)
+        .single();
+
+      if (error || !data) {
+        return null;
+      }
+
+      return {
+        original_script: this.normalizeOriginalScript(data.original_script),
+        original_script_status:
+          (data.original_script_status as OriginalScriptStatus) || null,
+        original_script_error: (data.original_script_error as string) || null,
+        original_script_started_at:
+          (data.original_script_started_at as string) || null,
+        original_script_completed_at:
+          (data.original_script_completed_at as string) || null,
+        audio_analysis_status: (data.audio_analysis_status as string) || null,
+        visual_analysis_status: (data.visual_analysis_status as string) || null,
+        text_extraction_status: (data.text_extraction_status as string) || null,
+      };
+    } catch {
+      return null;
+    }
+  }
+
   /**
    * Fetches a single ContentAnalysisRecord by ID for the authenticated user.
    */
@@ -1161,6 +1398,9 @@ class ContentAnalysisService {
       textExtraction: record.text_extraction || null,
       textExtractionStatus: record.text_extraction_status || null,
       textExtractionError: record.text_extraction_error || null,
+      originalScript: record.original_script || null,
+      originalScriptStatus: record.original_script_status || null,
+      originalScriptError: record.original_script_error || null,
     };
   }
 

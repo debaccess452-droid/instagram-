@@ -25,6 +25,10 @@ import {
   VisualScene,
   VisualBackendResult,
   VisualAnalysisStatus,
+  VisualGeminiStep1Result,
+  VisualGeminiOutfitChange,
+  VisualStep1Status,
+  VisualStep2Status,
   FramePathItem,
   VisualSamplingMetadata,
 } from "../types/analysis";
@@ -34,6 +38,10 @@ import { cn } from "@/utils/cn";
 export interface VisualAnalysisProps {
   data?: VisualAnalysisData; // benchmark demo data fallback
   realData?: VisualBackendResult | null; // real Supabase Edge Function result
+  geminiStep1Data?: VisualGeminiStep1Result | null;
+  groqStep2Data?: VisualBackendResult | Record<string, unknown> | null;
+  step1Status?: VisualStep1Status | null;
+  step2Status?: VisualStep2Status | null;
   onSeek: (seconds: number) => void;
   isDemoData?: boolean;
   status?: VisualAnalysisStatus | null;
@@ -61,6 +69,40 @@ function formatSecondsToTimestamp(seconds: number): string {
 
 function formatTimeRange(start: number, end: number): string {
   return `${formatSecondsToTimestamp(start)}–${formatSecondsToTimestamp(end)}`;
+}
+
+function parseFlexibleSeconds(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
+    return value;
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    if (trimmed.includes(":")) {
+      const parts = trimmed.split(":").map((p) => Number(p));
+      if (parts.length === 2 && parts.every((n) => Number.isFinite(n) && n >= 0)) {
+        return parts[0] * 60 + parts[1];
+      }
+      if (parts.length === 3 && parts.every((n) => Number.isFinite(n) && n >= 0)) {
+        return parts[0] * 3600 + parts[1] * 60 + parts[2];
+      }
+    }
+    const numeric = Number(trimmed.replace(/s$/i, ""));
+    if (Number.isFinite(numeric) && numeric >= 0) {
+      return numeric;
+    }
+  }
+  return null;
+}
+
+function formatOutfitDetailValue(value: unknown): string | null {
+  if (!value) return null;
+  if (Array.isArray(value)) {
+    const cleaned = value.map((v) => String(v || "").trim()).filter(Boolean);
+    return cleaned.length > 0 ? cleaned.join(", ") : null;
+  }
+  const str = String(value).trim();
+  return str.length > 0 ? str : null;
 }
 
 /**
@@ -111,6 +153,10 @@ function getSceneVisualDescription(scene: VisualScene): string {
 export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
   data,
   realData,
+  geminiStep1Data = null,
+  groqStep2Data = null,
+  step1Status = null,
+  step2Status = null,
   onSeek,
   isDemoData = false,
   status,
@@ -128,24 +174,407 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
   const [copiedAll, setCopiedAll] = useState(false);
 
   const normalizedStatus = String(status || "").trim().toLowerCase();
+  const rawStep1Status = String(step1Status || "").trim().toLowerCase();
+  const rawStep2Status = String(step2Status || "").trim().toLowerCase();
+
   const isCompletedStatus = normalizedStatus === "completed";
   const isFailedStatus = normalizedStatus === "failed";
   const isQueuedStatus = normalizedStatus === "queued";
   const isGroqFallbackStage =
-    normalizedStatus.includes("groq") || normalizedStatus.includes("fallback");
+    normalizedStatus.includes("groq") ||
+    normalizedStatus.includes("fallback") ||
+    normalizedStatus.includes("step2");
   const isBackendActiveStatus =
     isQueuedStatus ||
     normalizedStatus === "processing" ||
-    isGroqFallbackStage;
+    normalizedStatus.includes("step1") ||
+    normalizedStatus.includes("gemini") ||
+    isGroqFallbackStage ||
+    rawStep1Status === "processing" ||
+    rawStep2Status === "processing";
 
   // 1. Completed + saved result MUST render immediately (never restart or show loading/stale error)
   const shouldRenderCompletedRealData = Boolean(realData) && isCompletedStatus;
 
-  // 2. Active manual start/retry or active backend queued/processing/groq job
+  // Resolve sequential step statuses accurately for display
+  const effectiveStep1Status: "pending" | "processing" | "completed" | "failed" =
+    rawStep1Status === "completed" ||
+    rawStep1Status === "processing" ||
+    rawStep1Status === "failed" ||
+    rawStep1Status === "pending"
+      ? rawStep1Status
+      : geminiStep1Data || shouldRenderCompletedRealData
+      ? "completed"
+      : isFailedStatus
+      ? "failed"
+      : isBackendActiveStatus && !isQueuedStatus
+      ? "processing"
+      : "pending";
+
+  const effectiveStep2Status: "pending" | "blocked" | "processing" | "completed" | "failed" =
+    rawStep2Status === "completed" ||
+    rawStep2Status === "blocked" ||
+    rawStep2Status === "processing" ||
+    rawStep2Status === "failed" ||
+    rawStep2Status === "pending"
+      ? rawStep2Status
+      : effectiveStep1Status === "failed"
+      ? "blocked"
+      : shouldRenderCompletedRealData || Boolean(groqStep2Data)
+      ? "completed"
+      : isFailedStatus && effectiveStep1Status === "completed"
+      ? "failed"
+      : effectiveStep1Status === "completed" && isBackendActiveStatus
+      ? "processing"
+      : "pending";
+
+  const step1LabelMap: Record<typeof effectiveStep1Status, string> = {
+    pending: "Waiting to start",
+    processing: "Analyzing original Reel",
+    completed: "Outfit timeline ready",
+    failed: "Gemini analysis failed",
+  };
+
+  const step2LabelMap: Record<typeof effectiveStep2Status, string> = {
+    pending: "Waiting for Gemini to finish",
+    blocked: "Waiting because Gemini Step 1 failed",
+    processing: "Analyzing adaptive frames",
+    completed: "Detailed frame analysis ready",
+    failed: "Groq analysis failed",
+  };
+
+  const hasStepMetadata =
+    Boolean(step1Status) ||
+    Boolean(step2Status) ||
+    Boolean(geminiStep1Data) ||
+    Boolean(groqStep2Data);
+
+  const geminiOutfitChanges: VisualGeminiOutfitChange[] = Array.isArray(
+    geminiStep1Data?.outfit_changes
+  )
+    ? geminiStep1Data.outfit_changes
+    : [];
+
+  const canShowGeminiStep1Result =
+    !isDemoData &&
+    (effectiveStep1Status === "completed" || Boolean(geminiStep1Data)) &&
+    (Boolean(geminiStep1Data) || effectiveStep1Status === "completed");
+
+  const renderTwoStepProgressCard = (compact = false) => (
+    <div
+      className={cn(
+        "rounded-xl border border-card-border bg-card shadow-card text-left",
+        compact ? "p-4 space-y-3" : "p-5 space-y-3.5"
+      )}
+    >
+      <div className="flex items-center justify-between gap-2 border-b border-card-border/60 pb-2.5">
+        <div className="flex items-center gap-2">
+          <span className="p-1.5 rounded-lg bg-primary/15 text-primary border border-primary/25">
+            <Layers className="h-3.5 w-3.5" />
+          </span>
+          <div>
+            <h4 className="text-xs sm:text-sm font-bold text-text-primary">
+              Two-Step Sequential Visual Analysis
+            </h4>
+            <p className="text-[11px] text-text-muted">
+              Original video outfit tracking followed by adaptive frame-by-frame inspection
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+        {/* Step 1 — Gemini Original Video Analysis */}
+        <div
+          className={cn(
+            "rounded-lg border p-3.5 space-y-1.5 transition-colors",
+            effectiveStep1Status === "completed"
+              ? "bg-success/5 border-success/30"
+              : effectiveStep1Status === "failed"
+              ? "bg-error/5 border-error/30"
+              : effectiveStep1Status === "processing"
+              ? "bg-primary/5 border-primary/35"
+              : "bg-background-elevated/60 border-card-border"
+          )}
+        >
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[11px] font-bold text-text-primary">
+              Step 1 — Gemini Original Video Analysis
+            </span>
+            {effectiveStep1Status === "completed" ? (
+              <span className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-[10px] font-mono font-semibold bg-success/15 text-success border border-success/25 shrink-0">
+                <Check className="h-3 w-3" />
+                Completed
+              </span>
+            ) : effectiveStep1Status === "processing" ? (
+              <span className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-[10px] font-mono font-semibold bg-primary/15 text-primary border border-primary/30 shrink-0">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                Processing
+              </span>
+            ) : effectiveStep1Status === "failed" ? (
+              <span className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-[10px] font-mono font-semibold bg-error/15 text-error border border-error/30 shrink-0">
+                <AlertTriangle className="h-3 w-3" />
+                Failed
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-[10px] font-mono font-semibold bg-background-elevated text-text-muted border border-card-border shrink-0">
+                <Clock className="h-3 w-3" />
+                Pending
+              </span>
+            )}
+          </div>
+          <p
+            className={cn(
+              "text-xs font-medium",
+              effectiveStep1Status === "completed"
+                ? "text-success"
+                : effectiveStep1Status === "failed"
+                ? "text-error"
+                : effectiveStep1Status === "processing"
+                ? "text-primary"
+                : "text-text-secondary"
+            )}
+          >
+            {step1LabelMap[effectiveStep1Status]}
+          </p>
+        </div>
+
+        {/* Step 2 — Groq Adaptive Frame Analysis */}
+        <div
+          className={cn(
+            "rounded-lg border p-3.5 space-y-1.5 transition-colors",
+            effectiveStep2Status === "completed"
+              ? "bg-success/5 border-success/30"
+              : effectiveStep2Status === "failed"
+              ? "bg-error/5 border-error/30"
+              : effectiveStep2Status === "blocked"
+              ? "bg-warning/5 border-warning/30"
+              : effectiveStep2Status === "processing"
+              ? "bg-primary/5 border-primary/35"
+              : "bg-background-elevated/60 border-card-border"
+          )}
+        >
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[11px] font-bold text-text-primary">
+              Step 2 — Groq Adaptive Frame Analysis
+            </span>
+            {effectiveStep2Status === "completed" ? (
+              <span className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-[10px] font-mono font-semibold bg-success/15 text-success border border-success/25 shrink-0">
+                <Check className="h-3 w-3" />
+                Completed
+              </span>
+            ) : effectiveStep2Status === "processing" ? (
+              <span className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-[10px] font-mono font-semibold bg-primary/15 text-primary border border-primary/30 shrink-0">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                Processing
+              </span>
+            ) : effectiveStep2Status === "failed" ? (
+              <span className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-[10px] font-mono font-semibold bg-error/15 text-error border border-error/30 shrink-0">
+                <AlertTriangle className="h-3 w-3" />
+                Failed
+              </span>
+            ) : effectiveStep2Status === "blocked" ? (
+              <span className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-[10px] font-mono font-semibold bg-warning/15 text-warning border border-warning/30 shrink-0">
+                <ShieldAlert className="h-3 w-3" />
+                Blocked
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-[10px] font-mono font-semibold bg-background-elevated text-text-muted border border-card-border shrink-0">
+                <Clock className="h-3 w-3" />
+                Pending
+              </span>
+            )}
+          </div>
+          <p
+            className={cn(
+              "text-xs font-medium",
+              effectiveStep2Status === "completed"
+                ? "text-success"
+                : effectiveStep2Status === "failed"
+                ? "text-error"
+                : effectiveStep2Status === "blocked"
+                ? "text-warning"
+                : effectiveStep2Status === "processing"
+                ? "text-primary"
+                : "text-text-secondary"
+            )}
+          >
+            {step2LabelMap[effectiveStep2Status]}
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+
+  const renderGeminiOutfitTimelineCard = () => {
+    if (!canShowGeminiStep1Result) return null;
+
+    return (
+      <div className="rounded-xl border border-card-border bg-card p-5 space-y-4 shadow-card text-left">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 border-b border-card-border/60 pb-3">
+          <div className="flex items-center gap-2.5">
+            <span className="p-2 rounded-lg bg-primary/15 text-primary border border-primary/25">
+              <Sparkles className="h-4 w-4" />
+            </span>
+            <div>
+              <h3 className="text-sm font-bold text-text-primary">
+                Gemini Step 1 — Outfit Change Timeline ({geminiOutfitChanges.length}{" "}
+                {geminiOutfitChanges.length === 1 ? "Outfit" : "Outfits"})
+              </h3>
+              <p className="text-[11px] text-text-muted">
+                Extracted directly from your uploaded original Reel
+              </p>
+            </div>
+          </div>
+
+          <span className="inline-flex items-center gap-1 rounded bg-success/15 px-2.5 py-0.5 text-[10px] font-mono font-semibold text-success border border-success/25 w-fit">
+            <Check className="h-3 w-3" />
+            Outfit timeline ready
+          </span>
+        </div>
+
+        {typeof geminiStep1Data?.summary === "string" && geminiStep1Data.summary.trim().length > 0 && (
+          <div className="rounded-lg bg-background-elevated/70 p-3.5 border border-card-border text-xs text-text-secondary leading-relaxed">
+            {geminiStep1Data.summary}
+          </div>
+        )}
+
+        {geminiOutfitChanges.length > 0 ? (
+          <div className="space-y-3">
+            {geminiOutfitChanges.map((item, idx) => {
+              const outfitNum = item.outfit_number ?? idx + 1;
+              const startSec = parseFlexibleSeconds(
+                item.estimated_start_time_seconds ??
+                  item.estimated_start_seconds ??
+                  item.start_time_seconds ??
+                  item.start_timestamp
+              );
+              const endSec = parseFlexibleSeconds(
+                item.estimated_end_time_seconds ??
+                  item.estimated_end_seconds ??
+                  item.end_time_seconds ??
+                  item.end_timestamp
+              );
+              const rangeLabel =
+                startSec !== null && endSec !== null
+                  ? formatTimeRange(startSec, endSec)
+                  : startSec !== null
+                  ? formatSecondsToTimestamp(startSec)
+                  : item.start_timestamp || item.end_timestamp
+                  ? `${item.start_timestamp ?? "?"}–${item.end_timestamp ?? "?"}`
+                  : null;
+
+              const description = formatOutfitDetailValue(
+                item.outfit_description ?? item.description
+              );
+              const clothing = formatOutfitDetailValue(item.clothing);
+              const footwear = formatOutfitDetailValue(item.footwear);
+              const accessories = formatOutfitDetailValue(item.accessories);
+              const hairstyle = formatOutfitDetailValue(item.hairstyle);
+              const evidenceNotes = formatOutfitDetailValue(
+                item.evidence_notes ?? item.notes
+              );
+
+              return (
+                <div
+                  key={`gemini-outfit-${outfitNum}-${idx}`}
+                  className="rounded-xl border border-card-border bg-background-elevated/40 p-4 space-y-3 hover:border-primary/40 transition-colors"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-card-border/60 pb-2.5">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-mono font-bold bg-primary/20 text-primary border border-primary/30">
+                        Outfit #{outfitNum}
+                      </span>
+                      {rangeLabel &&
+                        (startSec !== null ? (
+                          <button
+                            type="button"
+                            onClick={() => onSeek(startSec)}
+                            className="inline-flex items-center gap-1.5 rounded bg-primary/10 hover:bg-primary/20 text-primary border border-primary/25 px-2.5 py-0.5 font-mono text-xs font-semibold transition-colors cursor-pointer"
+                            title="Seek video to estimated outfit start"
+                          >
+                            <Play className="h-3 w-3 fill-current" />
+                            <span>Est. {rangeLabel}</span>
+                          </button>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 rounded bg-background-elevated text-text-secondary border border-card-border px-2.5 py-0.5 font-mono text-xs font-semibold">
+                            Est. {rangeLabel}
+                          </span>
+                        ))}
+                    </div>
+                  </div>
+
+                  {description && (
+                    <p className="text-xs leading-relaxed text-text-primary font-medium">
+                      {description}
+                    </p>
+                  )}
+
+                  {(clothing || footwear || accessories || hairstyle || evidenceNotes) && (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5 text-[11px]">
+                      {clothing && (
+                        <div className="rounded-lg bg-card/80 p-2.5 border border-card-border/80 space-y-1">
+                          <span className="text-[10px] font-semibold text-text-muted uppercase tracking-wider block">
+                            Clothing
+                          </span>
+                          <p className="text-text-secondary leading-relaxed">{clothing}</p>
+                        </div>
+                      )}
+                      {footwear && (
+                        <div className="rounded-lg bg-card/80 p-2.5 border border-card-border/80 space-y-1">
+                          <span className="text-[10px] font-semibold text-text-muted uppercase tracking-wider block">
+                            Footwear
+                          </span>
+                          <p className="text-text-secondary leading-relaxed">{footwear}</p>
+                        </div>
+                      )}
+                      {accessories && (
+                        <div className="rounded-lg bg-card/80 p-2.5 border border-card-border/80 space-y-1">
+                          <span className="text-[10px] font-semibold text-text-muted uppercase tracking-wider block">
+                            Accessories
+                          </span>
+                          <p className="text-text-secondary leading-relaxed">{accessories}</p>
+                        </div>
+                      )}
+                      {hairstyle && (
+                        <div className="rounded-lg bg-card/80 p-2.5 border border-card-border/80 space-y-1">
+                          <span className="text-[10px] font-semibold text-text-muted uppercase tracking-wider block">
+                            Hairstyle
+                          </span>
+                          <p className="text-text-secondary leading-relaxed">{hairstyle}</p>
+                        </div>
+                      )}
+                      {evidenceNotes && (
+                        <div className="rounded-lg bg-card/80 p-2.5 border border-card-border/80 space-y-1 sm:col-span-2 lg:col-span-2">
+                          <span className="text-[10px] font-semibold text-text-muted uppercase tracking-wider block">
+                            Evidence Notes
+                          </span>
+                          <p className="text-text-secondary leading-relaxed">{evidenceNotes}</p>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <p className="text-xs text-text-muted italic">
+            No outfit changes were recorded in Gemini original video analysis.
+          </p>
+        )}
+      </div>
+    );
+  };
+
+  // 2. Active manual start/retry or active backend sequential job
   const showActiveProgress =
     !shouldRenderCompletedRealData &&
     ((isProcessing && Boolean(progressStepMessage)) ||
-      (isBackendActiveStatus && !isFailedStatus));
+      (isBackendActiveStatus &&
+        !isFailedStatus &&
+        rawStep1Status !== "failed" &&
+        rawStep2Status !== "failed"));
 
   if (showActiveProgress) {
     const progressLower = (progressStepMessage || "").toLowerCase();
@@ -171,187 +600,224 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
 
     const activeHeading =
       progressStepMessage ||
-      (isGroqFallbackStage
-        ? "Processing (Groq fallback analyzing selected frames)..."
+      (effectiveStep1Status === "completed" && effectiveStep2Status === "processing"
+        ? "Step 2: Analyzing adaptive frames with Groq..."
+        : effectiveStep1Status === "processing"
+        ? "Step 1: Analyzing original Reel with Gemini..."
+        : isGroqFallbackStage
+        ? "Analyzing adaptive frames..."
         : isQueuedStatus
         ? "Queued for visual analysis..."
         : "Processing visual analysis...");
 
     const activeDescription = progressStepMessage
-      ? "Running adaptive, scene-aware frame sampling across your uploaded Reel before queueing backend analysis."
-      : isGroqFallbackStage
-      ? "Using the adaptively selected representative frames to analyze visible scenes, subjects, and on-screen details."
+      ? "Running adaptive, scene-aware frame sampling across your uploaded Reel before queueing sequential analysis."
+      : effectiveStep1Status === "completed"
+      ? "Gemini Step 1 outfit timeline is ready below while Groq analyzes your adaptively sampled frames."
       : isQueuedStatus
-      ? "Your Reel visual analysis job is queued in the background. Monitoring existing job status..."
-      : "Observing scenes, camera framing, visible subjects, and visual composition from your uploaded Reel.";
+      ? "Your Reel visual analysis job is queued in the background. Monitoring Step 1 and Step 2 status..."
+      : "Observing original Reel outfits, scenes, camera framing, visible subjects, and visual composition.";
 
     const activeFooterLabel = progressStepMessage
       ? "Analyzing video progressively in browser"
-      : isGroqFallbackStage
-      ? "Groq fallback processing • Checking status every 5 seconds"
+      : effectiveStep1Status === "completed" && effectiveStep2Status === "processing"
+      ? "Step 2 running • Checking status every 5 seconds"
+      : effectiveStep1Status === "processing"
+      ? "Step 1 running • Checking status every 5 seconds"
       : isQueuedStatus
       ? "Queued • Checking status every 5 seconds"
       : "Processing • Checking status every 5 seconds";
 
     return (
-      <div className="rounded-2xl border border-primary/30 bg-card p-8 sm:p-12 shadow-card text-center space-y-5">
-        <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-primary/10 border border-primary/20 text-primary mx-auto">
-          <Loader2 className="h-8 w-8 animate-spin" />
-        </div>
-        <div className="max-w-lg mx-auto space-y-2">
-          <h3 className="text-lg font-bold text-text-primary">
-            {activeHeading}
-          </h3>
-          <p className="text-xs text-text-secondary leading-relaxed">
-            {activeDescription}
-          </p>
-          <div className="pt-2 text-[11px] font-mono text-text-muted flex items-center justify-center gap-2">
-            <span className="h-2 w-2 rounded-full bg-primary animate-pulse" />
-            <span>{activeFooterLabel}</span>
+      <div className="space-y-5">
+        <div className="rounded-2xl border border-primary/30 bg-card p-6 sm:p-8 shadow-card text-center space-y-5">
+          <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-primary/10 border border-primary/20 text-primary mx-auto">
+            <Loader2 className="h-7 w-7 animate-spin" />
           </div>
+          <div className="max-w-lg mx-auto space-y-2">
+            <h3 className="text-lg font-bold text-text-primary">
+              {activeHeading}
+            </h3>
+            <p className="text-xs text-text-secondary leading-relaxed">
+              {activeDescription}
+            </p>
+            <div className="pt-1 text-[11px] font-mono text-text-muted flex items-center justify-center gap-2">
+              <span className="h-2 w-2 rounded-full bg-primary animate-pulse" />
+              <span>{activeFooterLabel}</span>
+            </div>
 
-          {/* 5-Stage Pipeline Progress */}
-          <div className="pt-3 flex flex-wrap items-center justify-center gap-1.5">
-            {pipelineStages.map((stageLabel, idx) => {
-              const isDone = idx < activeStageIndex;
-              const isCurrent = idx === activeStageIndex;
-              return (
-                <span
-                  key={stageLabel}
-                  className={cn(
-                    "rounded-md px-2 py-1 text-[10px] font-mono border transition-colors",
-                    isCurrent
-                      ? "bg-primary/15 text-primary border-primary/40 font-semibold"
-                      : isDone
-                      ? "bg-success/10 text-success border-success/25"
-                      : "bg-background-elevated text-text-muted border-card-border"
-                  )}
-                >
-                  {idx + 1}. {stageLabel}
-                </span>
-              );
-            })}
-          </div>
-
-          {!progressStepMessage && submittedFrames.length > 0 && (
-            <div className="pt-3 mt-2 border-t border-card-border/60 space-y-2">
-              <p className="text-[11px] font-semibold text-text-secondary">
-                {submittedFrames.length} adaptive representative{" "}
-                {submittedFrames.length === 1 ? "frame" : "frames"} uploaded & submitted
-              </p>
-              {samplingMetadata && (
-                <div className="flex flex-wrap items-center justify-center gap-1.5 text-[10px] font-mono text-text-muted">
-                  {samplingMetadata.actualDurationSeconds !== null && (
-                    <span className="rounded bg-background-elevated px-2 py-0.5 border border-card-border">
-                      Duration: {samplingMetadata.actualDurationSeconds.toFixed(2)}s
-                    </span>
-                  )}
-                  {samplingMetadata.firstTimestampSeconds !== null && (
-                    <span className="rounded bg-background-elevated px-2 py-0.5 border border-card-border">
-                      First: {samplingMetadata.firstTimestampSeconds.toFixed(2)}s
-                    </span>
-                  )}
-                  {samplingMetadata.lastTimestampSeconds !== null && (
-                    <span className="rounded bg-background-elevated px-2 py-0.5 border border-card-border">
-                      Last: {samplingMetadata.lastTimestampSeconds.toFixed(2)}s
-                    </span>
-                  )}
-                  {samplingMetadata.openingFrameCovered !== null && (
-                    <span
-                      className={cn(
-                        "rounded px-2 py-0.5 border",
-                        samplingMetadata.openingFrameCovered
-                          ? "bg-success/10 text-success border-success/25"
-                          : "bg-warning/10 text-warning border-warning/25"
-                      )}
-                    >
-                      Start: {samplingMetadata.openingFrameCovered ? "Covered" : "Missed"}
-                    </span>
-                  )}
-                  {samplingMetadata.endFrameCovered !== null && (
-                    <span
-                      className={cn(
-                        "rounded px-2 py-0.5 border",
-                        samplingMetadata.endFrameCovered
-                          ? "bg-success/10 text-success border-success/25"
-                          : "bg-warning/10 text-warning border-warning/25"
-                      )}
-                    >
-                      End: {samplingMetadata.endFrameCovered ? "Covered" : "Failed"}
-                    </span>
-                  )}
+            {/* 5-Stage Frame Preparation & Queue Progress */}
+            <div className="pt-2 flex flex-wrap items-center justify-center gap-1.5">
+              {pipelineStages.map((stageLabel, idx) => {
+                const isDone = idx < activeStageIndex;
+                const isCurrent = idx === activeStageIndex;
+                return (
                   <span
+                    key={stageLabel}
                     className={cn(
-                      "rounded px-2 py-0.5 border",
-                      samplingMetadata.samplingLimitReached
-                        ? "bg-warning/10 text-warning border-warning/25"
-                        : "bg-background-elevated border-card-border"
+                      "rounded-md px-2 py-1 text-[10px] font-mono border transition-colors",
+                      isCurrent
+                        ? "bg-primary/15 text-primary border-primary/40 font-semibold"
+                        : isDone
+                        ? "bg-success/10 text-success border-success/25"
+                        : "bg-background-elevated text-text-muted border-card-border"
                     )}
                   >
-                    30-Frame Limit: {samplingMetadata.samplingLimitReached ? "Reached" : "Within limit"}
+                    {idx + 1}. {stageLabel}
                   </span>
-                </div>
-              )}
-              {samplingMetadata?.endpointWarning && (
-                <p className="text-[11px] text-warning bg-warning/10 border border-warning/25 rounded-md px-3 py-1.5 text-left">
-                  {samplingMetadata.endpointWarning}
-                </p>
-              )}
-              {samplingWarning && (
-                <p className="text-[11px] text-warning bg-warning/10 border border-warning/25 rounded-md px-3 py-1.5 text-left">
-                  {samplingWarning}
-                </p>
-              )}
-              <div className="flex flex-wrap items-center justify-center gap-1.5">
-                {submittedFrames.map((f, idx) => (
-                  <span
-                    key={`${f.path}-${idx}`}
-                    className="rounded bg-background-elevated px-2 py-0.5 font-mono text-[10px] text-text-muted border border-card-border"
-                  >
-                    #{idx + 1} · {formatSecondsToTimestamp(f.timestamp_seconds)}
-                  </span>
-                ))}
-              </div>
+                );
+              })}
             </div>
-          )}
+
+            {!progressStepMessage && submittedFrames.length > 0 && (
+              <div className="pt-3 mt-2 border-t border-card-border/60 space-y-2">
+                <p className="text-[11px] font-semibold text-text-secondary">
+                  {submittedFrames.length} adaptive representative{" "}
+                  {submittedFrames.length === 1 ? "frame" : "frames"} uploaded & submitted
+                </p>
+                {samplingMetadata && (
+                  <div className="flex flex-wrap items-center justify-center gap-1.5 text-[10px] font-mono text-text-muted">
+                    {samplingMetadata.actualDurationSeconds !== null && (
+                      <span className="rounded bg-background-elevated px-2 py-0.5 border border-card-border">
+                        Duration: {samplingMetadata.actualDurationSeconds.toFixed(2)}s
+                      </span>
+                    )}
+                    {samplingMetadata.firstTimestampSeconds !== null && (
+                      <span className="rounded bg-background-elevated px-2 py-0.5 border border-card-border">
+                        First: {samplingMetadata.firstTimestampSeconds.toFixed(2)}s
+                      </span>
+                    )}
+                    {samplingMetadata.lastTimestampSeconds !== null && (
+                      <span className="rounded bg-background-elevated px-2 py-0.5 border border-card-border">
+                        Last: {samplingMetadata.lastTimestampSeconds.toFixed(2)}s
+                      </span>
+                    )}
+                    {samplingMetadata.openingFrameCovered !== null && (
+                      <span
+                        className={cn(
+                          "rounded px-2 py-0.5 border",
+                          samplingMetadata.openingFrameCovered
+                            ? "bg-success/10 text-success border-success/25"
+                            : "bg-warning/10 text-warning border-warning/25"
+                        )}
+                      >
+                        Start: {samplingMetadata.openingFrameCovered ? "Covered" : "Missed"}
+                      </span>
+                    )}
+                    {samplingMetadata.endFrameCovered !== null && (
+                      <span
+                        className={cn(
+                          "rounded px-2 py-0.5 border",
+                          samplingMetadata.endFrameCovered
+                            ? "bg-success/10 text-success border-success/25"
+                            : "bg-warning/10 text-warning border-warning/25"
+                        )}
+                      >
+                        End: {samplingMetadata.endFrameCovered ? "Covered" : "Failed"}
+                      </span>
+                    )}
+                    <span
+                      className={cn(
+                        "rounded px-2 py-0.5 border",
+                        samplingMetadata.samplingLimitReached
+                          ? "bg-warning/10 text-warning border-warning/25"
+                          : "bg-background-elevated border-card-border"
+                      )}
+                    >
+                      30-Frame Limit: {samplingMetadata.samplingLimitReached ? "Reached" : "Within limit"}
+                    </span>
+                  </div>
+                )}
+                {samplingMetadata?.endpointWarning && (
+                  <p className="text-[11px] text-warning bg-warning/10 border border-warning/25 rounded-md px-3 py-1.5 text-left">
+                    {samplingMetadata.endpointWarning}
+                  </p>
+                )}
+                {samplingWarning && (
+                  <p className="text-[11px] text-warning bg-warning/10 border border-warning/25 rounded-md px-3 py-1.5 text-left">
+                    {samplingWarning}
+                  </p>
+                )}
+                <div className="flex flex-wrap items-center justify-center gap-1.5">
+                  {submittedFrames.map((f, idx) => (
+                    <span
+                      key={`${f.path}-${idx}`}
+                      className="rounded bg-background-elevated px-2 py-0.5 font-mono text-[10px] text-text-muted border border-card-border"
+                    >
+                      #{idx + 1} · {formatSecondsToTimestamp(f.timestamp_seconds)}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
         </div>
+
+        {/* Two-Step Sequential Progress Display */}
+        {renderTwoStepProgressCard(true)}
+
+        {/* Immediately show Gemini Step 1 outfit timeline once completed, even while Groq runs */}
+        {renderGeminiOutfitTimelineCard()}
       </div>
     );
   }
 
-  // 3. Failed State with Retry Action
-  if (!shouldRenderCompletedRealData && (isFailedStatus || (!realData && Boolean(errorMessage)))) {
+  // 3. Failed State with Step-Aware Retry Action (preserves Step 1 result if Step 2 failed)
+  const isStep2OnlyFailure =
+    effectiveStep1Status === "completed" && effectiveStep2Status === "failed";
+
+  if (
+    !shouldRenderCompletedRealData &&
+    (isFailedStatus ||
+      effectiveStep1Status === "failed" ||
+      effectiveStep2Status === "failed" ||
+      (!realData && Boolean(errorMessage)))
+  ) {
     return (
-      <div className="rounded-2xl border border-error/30 bg-card p-6 sm:p-8 shadow-card space-y-4">
-        <div className="flex items-start gap-3.5">
-          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-error/15 text-error shrink-0 border border-error/25">
-            <AlertTriangle className="h-5 w-5" />
+      <div className="space-y-5">
+        {renderTwoStepProgressCard(true)}
+
+        <div className="rounded-2xl border border-error/30 bg-card p-6 sm:p-8 shadow-card space-y-4">
+          <div className="flex items-start gap-3.5">
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-error/15 text-error shrink-0 border border-error/25">
+              <AlertTriangle className="h-5 w-5" />
+            </div>
+            <div className="space-y-1 flex-1">
+              <h3 className="text-base font-bold text-text-primary">
+                {isStep2OnlyFailure
+                  ? "Step 2 (Groq Adaptive Frame Analysis) Failed"
+                  : "Visual Analysis Failed"}
+              </h3>
+              <p className="text-xs text-error leading-relaxed">
+                {errorMessage ||
+                  (isStep2OnlyFailure
+                    ? "Groq adaptive frame analysis encountered an error. Gemini's Step 1 outfit timeline is preserved below."
+                    : "The backend encountered an error while processing visuals from your Reel.")}
+              </p>
+              <p className="text-[11px] text-text-muted mt-1">
+                {isStep2OnlyFailure
+                  ? "Your saved Step 1 outfit timeline remains intact. Retry Step 2 to resume adaptive frame analysis without losing Gemini's results."
+                  : "Your uploaded Reel is securely saved in storage. You do not need to re-upload your video to retry analysis."}
+              </p>
+            </div>
           </div>
-          <div className="space-y-1 flex-1">
-            <h3 className="text-base font-bold text-text-primary">
-              Visual Analysis Failed
-            </h3>
-            <p className="text-xs text-error leading-relaxed">
-              {errorMessage || "The backend encountered an error while processing visuals from your Reel."}
-            </p>
-            <p className="text-[11px] text-text-muted mt-1">
-              Your uploaded Reel is securely saved in storage. You do not need to re-upload your video to retry analysis.
-            </p>
-          </div>
+
+          {onRetry && (
+            <div className="flex justify-end pt-2 border-t border-card-border/80">
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={onRetry}
+                leftIcon={<RotateCcw className="h-4 w-4" />}
+              >
+                {isStep2OnlyFailure ? "Retry Step 2" : "Retry"}
+              </Button>
+            </div>
+          )}
         </div>
 
-        {onRetry && (
-          <div className="flex justify-end pt-2 border-t border-card-border/80">
-            <Button
-              variant="primary"
-              size="sm"
-              onClick={onRetry}
-              leftIcon={<RotateCcw className="h-4 w-4" />}
-            >
-              Retry Visual Analysis
-            </Button>
-          </div>
-        )}
+        {/* Preserve and continue displaying Gemini Step 1 result if Step 2 failed */}
+        {renderGeminiOutfitTimelineCard()}
       </div>
     );
   }
@@ -359,34 +825,37 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
   // 4. Pending / Not Analyzed State (manual start only — never auto-starts on reopen)
   if (!realData && !data && (normalizedStatus === "pending" || !normalizedStatus)) {
     return (
-      <div className="rounded-2xl border border-card-border bg-card p-8 sm:p-10 shadow-card text-center space-y-4">
-        <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-primary/10 border border-primary/20 text-primary mx-auto">
-          <Sparkles className="h-8 w-8" />
-        </div>
-        <div className="max-w-md mx-auto space-y-2">
-          <h3 className="text-lg font-bold text-text-primary">
-            Ready for Visual Intelligence
-          </h3>
-          <p className="text-xs text-text-secondary leading-relaxed">
-            Your Reel is stored in private Supabase Storage. Run the Visual Analysis pipeline
-            (Gemini primary full-video analysis, with adaptive scene-aware frame sampling up to a
-            30-frame safety ceiling for Groq fallback readiness)
-            to observe scenes, camera framing, subject actions, lighting, and visual composition.
-          </p>
-        </div>
-        {onAnalyzeVisual && (
-          <div className="pt-2">
-            <Button
-              variant="primary"
-              size="lg"
-              onClick={onAnalyzeVisual}
-              leftIcon={<Sparkles className="h-5 w-5" />}
-              className="shadow-glow-primary py-3 px-6 cursor-pointer"
-            >
-              Analyze Visuals
-            </Button>
+      <div className="space-y-5">
+        <div className="rounded-2xl border border-card-border bg-card p-8 sm:p-10 shadow-card text-center space-y-4">
+          <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-primary/10 border border-primary/20 text-primary mx-auto">
+            <Sparkles className="h-8 w-8" />
           </div>
-        )}
+          <div className="max-w-md mx-auto space-y-2">
+            <h3 className="text-lg font-bold text-text-primary">
+              Ready for Visual Intelligence
+            </h3>
+            <p className="text-xs text-text-secondary leading-relaxed">
+              Your Reel is stored in private Supabase Storage. Run the two-step Visual Analysis pipeline
+              (Step 1 Gemini original video outfit analysis, followed by Step 2 Groq adaptive frame analysis)
+              to observe outfits, scenes, camera framing, visible subjects, and visual composition.
+            </p>
+          </div>
+          {onAnalyzeVisual && (
+            <div className="pt-2">
+              <Button
+                variant="primary"
+                size="lg"
+                onClick={onAnalyzeVisual}
+                leftIcon={<Sparkles className="h-5 w-5" />}
+                className="shadow-glow-primary py-3 px-6 cursor-pointer"
+              >
+                Analyze Visuals
+              </Button>
+            </div>
+          )}
+        </div>
+
+        {renderTwoStepProgressCard(true)}
       </div>
     );
   }
@@ -394,32 +863,36 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
   // 5. Edge case: status is completed in DB but visual_analysis payload is empty
   if (isCompletedStatus && !realData && !data) {
     return (
-      <div className="rounded-2xl border border-card-border bg-card p-6 sm:p-8 shadow-card space-y-4">
-        <div className="flex items-start gap-3.5">
-          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-warning/15 text-warning shrink-0 border border-warning/25">
-            <AlertTriangle className="h-5 w-5" />
+      <div className="space-y-5">
+        {hasStepMetadata && renderTwoStepProgressCard(true)}
+        <div className="rounded-2xl border border-card-border bg-card p-6 sm:p-8 shadow-card space-y-4">
+          <div className="flex items-start gap-3.5">
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-warning/15 text-warning shrink-0 border border-warning/25">
+              <AlertTriangle className="h-5 w-5" />
+            </div>
+            <div className="space-y-1 flex-1">
+              <h3 className="text-base font-bold text-text-primary">
+                Visual Analysis Result Unavailable
+              </h3>
+              <p className="text-xs text-text-secondary leading-relaxed">
+                This analysis record is marked as completed, but no visual analysis payload was saved.
+              </p>
+            </div>
           </div>
-          <div className="space-y-1 flex-1">
-            <h3 className="text-base font-bold text-text-primary">
-              Visual Analysis Result Unavailable
-            </h3>
-            <p className="text-xs text-text-secondary leading-relaxed">
-              This analysis record is marked as completed, but no visual analysis payload was saved.
-            </p>
-          </div>
+          {onRetry && (
+            <div className="flex justify-end pt-2 border-t border-card-border/80">
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={onRetry}
+                leftIcon={<RotateCcw className="h-4 w-4" />}
+              >
+                Retry Visual Analysis
+              </Button>
+            </div>
+          )}
         </div>
-        {onRetry && (
-          <div className="flex justify-end pt-2 border-t border-card-border/80">
-            <Button
-              variant="primary"
-              size="sm"
-              onClick={onRetry}
-              leftIcon={<RotateCcw className="h-4 w-4" />}
-            >
-              Retry Visual Analysis
-            </Button>
-          </div>
-        )}
+        {renderGeminiOutfitTimelineCard()}
       </div>
     );
   }
@@ -645,6 +1118,10 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
             </Button>
           </div>
         </div>
+
+        {/* Two-Step Sequential Progress & Saved Gemini Outfit Timeline */}
+        {hasStepMetadata && renderTwoStepProgressCard(true)}
+        {renderGeminiOutfitTimelineCard()}
 
         {/* =================================================================== */}
         {/* SECTION 1: Video Overview                                           */}

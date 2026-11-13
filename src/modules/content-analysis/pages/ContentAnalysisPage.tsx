@@ -64,8 +64,30 @@ function isVisualActiveBackendStatus(status?: VisualAnalysisStatus | string | nu
   return (
     normalized === "queued" ||
     normalized === "processing" ||
+    normalized.includes("step1") ||
+    normalized.includes("step2") ||
+    normalized.includes("gemini") ||
     normalized.includes("groq") ||
     normalized.includes("fallback")
+  );
+}
+
+function isVisualPipelineActive(record?: ContentAnalysisRecord | null): boolean {
+  if (!record) return false;
+  const overall = normalizeVisualStatus(record.visual_analysis_status);
+  const step1 = normalizeVisualStatus(record.visual_analysis_step1_status);
+  const step2 = normalizeVisualStatus(record.visual_analysis_step2_status);
+
+  if (overall === "completed" || overall === "failed") {
+    return false;
+  }
+
+  return (
+    isVisualActiveBackendStatus(overall) ||
+    step1 === "processing" ||
+    step1 === "queued" ||
+    step2 === "processing" ||
+    step2 === "queued"
   );
 }
 
@@ -203,7 +225,7 @@ export const ContentAnalysisPage: React.FC = () => {
       setIsAnalyzingVisual(false);
       setVisualProgressMessage(null);
       setVisualAnalysisError(null);
-    } else if (isVisualActiveBackendStatus(vStatus)) {
+    } else if (isVisualActiveBackendStatus(vStatus) || isVisualPipelineActive(record)) {
       setPreparingVisualFramesState(false);
       setIsAnalyzingVisual(true);
       setVisualProgressMessage(null);
@@ -532,8 +554,8 @@ export const ContentAnalysisPage: React.FC = () => {
         return;
       }
 
-      // Guard: if DB already has an active queued/processing/groq job, monitor it instead of restarting
-      if (freshDbRecord && isVisualActiveBackendStatus(dbStatus)) {
+      // Guard: if DB already has an active sequential visual job, monitor it instead of restarting
+      if (freshDbRecord && isVisualPipelineActive(freshDbRecord)) {
         hydrateRealRecordState(freshDbRecord);
         const updatedItem = contentAnalysisService.mapRecordToHistoryItem(freshDbRecord);
         setHistoryItems((prev) => [updatedItem, ...prev.filter((p) => p.id !== freshDbRecord.id)]);
@@ -638,16 +660,24 @@ export const ContentAnalysisPage: React.FC = () => {
         setVisualProgressMessage(null);
         const newStatus: VisualAnalysisStatus = result.status || "queued";
 
-        setRealAudioRecord((prev) =>
-          prev && prev.id === targetRecord.id
-            ? {
-                ...prev,
-                file_path: authoritativeFilePath,
-                visual_analysis_status: newStatus,
-                visual_analysis_error: null,
-              }
-            : prev
-        );
+        setRealAudioRecord((prev) => {
+          if (!prev || prev.id !== targetRecord.id) return prev;
+          const prevStep1 = normalizeVisualStatus(prev.visual_analysis_step1_status);
+          const prevStep2 = normalizeVisualStatus(prev.visual_analysis_step2_status);
+          return {
+            ...prev,
+            file_path: authoritativeFilePath,
+            visual_analysis_status: newStatus,
+            visual_analysis_error: null,
+            // Preserve Gemini Step 1 completion when retrying Step 2; reset failed step states to pending
+            visual_analysis_step1_status:
+              prevStep1 === "failed" ? "pending" : prev.visual_analysis_step1_status,
+            visual_analysis_step2_status:
+              prevStep2 === "failed" || prevStep2 === "blocked"
+                ? "pending"
+                : prev.visual_analysis_step2_status,
+          };
+        });
 
         // Ensure signed playback URL is loaded
         if (!signedVideoUrl) {
@@ -761,10 +791,10 @@ export const ContentAnalysisPage: React.FC = () => {
     }
   };
 
-  // 7. Poll existing content_analyses record every 5 seconds ONLY when queued/processing/groq
+  // 7. Poll existing content_analyses record every 5 seconds ONLY when sequential visual job is active
   useEffect(() => {
     const currentRecordId = realAudioRecord?.id;
-    const currentStatus = realAudioRecord?.visual_analysis_status;
+    const isPipelineActive = isVisualPipelineActive(realAudioRecord);
 
     // Never poll while local browser frame extraction/upload is in progress
     if (isPreparingVisualFrames) {
@@ -772,15 +802,8 @@ export const ContentAnalysisPage: React.FC = () => {
       return;
     }
 
-    const normalizedStatus = normalizeVisualStatus(currentStatus);
-
     // Stop polling immediately if no record, completed, failed, or pending
-    if (
-      !currentRecordId ||
-      normalizedStatus === "completed" ||
-      normalizedStatus === "failed" ||
-      !isVisualActiveBackendStatus(normalizedStatus)
-    ) {
+    if (!currentRecordId || !isPipelineActive) {
       stopVisualPolling();
       return;
     }
@@ -794,6 +817,8 @@ export const ContentAnalysisPage: React.FC = () => {
         if (isCancelled || !statusData) return;
 
         const polledStatus = normalizeVisualStatus(statusData.visual_analysis_status);
+        const polledStep1 = normalizeVisualStatus(statusData.visual_analysis_step1_status);
+        const polledStep2 = normalizeVisualStatus(statusData.visual_analysis_step2_status);
 
         if (polledStatus === "completed") {
           stopVisualPolling();
@@ -813,7 +838,7 @@ export const ContentAnalysisPage: React.FC = () => {
               updatedHistoryItem,
               ...prev.filter((p) => p.id !== freshRecord.id),
             ]);
-          } else if (statusData.visual_analysis) {
+          } else {
             setRealAudioRecord((prev) =>
               prev && prev.id === currentRecordId
                 ? {
@@ -821,6 +846,14 @@ export const ContentAnalysisPage: React.FC = () => {
                     visual_analysis: statusData.visual_analysis,
                     visual_analysis_status: "completed",
                     visual_analysis_error: null,
+                    visual_analysis_gemini_step1:
+                      statusData.visual_analysis_gemini_step1 ?? prev.visual_analysis_gemini_step1,
+                    visual_analysis_groq_step2:
+                      statusData.visual_analysis_groq_step2 ?? prev.visual_analysis_groq_step2,
+                    visual_analysis_step1_status:
+                      statusData.visual_analysis_step1_status ?? prev.visual_analysis_step1_status,
+                    visual_analysis_step2_status:
+                      statusData.visual_analysis_step2_status ?? prev.visual_analysis_step2_status,
                   }
                 : prev
             );
@@ -832,7 +865,10 @@ export const ContentAnalysisPage: React.FC = () => {
           setIsAnalyzingVisual(false);
           setVisualProgressMessage(null);
           const errorMsg =
-            statusData.visual_analysis_error || "Visual analysis was unable to complete.";
+            statusData.visual_analysis_error ||
+            (polledStep1 === "completed" && polledStep2 === "failed"
+              ? "Groq adaptive frame analysis (Step 2) failed. Gemini Step 1 outfit timeline has been preserved."
+              : "Visual analysis was unable to complete.");
           setVisualAnalysisError(errorMsg);
 
           setRealAudioRecord((prev) =>
@@ -841,6 +877,14 @@ export const ContentAnalysisPage: React.FC = () => {
                   ...prev,
                   visual_analysis_status: "failed",
                   visual_analysis_error: errorMsg,
+                  visual_analysis_gemini_step1:
+                    statusData.visual_analysis_gemini_step1 ?? prev.visual_analysis_gemini_step1,
+                  visual_analysis_groq_step2:
+                    statusData.visual_analysis_groq_step2 ?? prev.visual_analysis_groq_step2,
+                  visual_analysis_step1_status:
+                    statusData.visual_analysis_step1_status ?? prev.visual_analysis_step1_status,
+                  visual_analysis_step2_status:
+                    statusData.visual_analysis_step2_status ?? prev.visual_analysis_step2_status,
                 }
               : prev
           );
@@ -848,22 +892,46 @@ export const ContentAnalysisPage: React.FC = () => {
           setHistoryItems((prev) =>
             prev.map((item) =>
               item.id === currentRecordId
-                ? { ...item, visualAnalysisStatus: "failed", visualAnalysisError: errorMsg }
+                ? {
+                    ...item,
+                    visualAnalysisStatus: "failed",
+                    visualAnalysisError: errorMsg,
+                    visualAnalysisGeminiStep1:
+                      statusData.visual_analysis_gemini_step1 ?? item.visualAnalysisGeminiStep1,
+                    visualAnalysisGroqStep2:
+                      statusData.visual_analysis_groq_step2 ?? item.visualAnalysisGroqStep2,
+                    visualAnalysisStep1Status:
+                      statusData.visual_analysis_step1_status ?? item.visualAnalysisStep1Status,
+                    visualAnalysisStep2Status:
+                      statusData.visual_analysis_step2_status ?? item.visualAnalysisStep2Status,
+                  }
                 : item
             )
           );
-        } else if (statusData.visual_analysis_status) {
+        } else {
+          // Sequential progress tick: immediately surface Step 1 Gemini result and step statuses
           setVisualProgressMessage(null);
-          setRealAudioRecord((prev) =>
-            prev &&
-            prev.id === currentRecordId &&
-            prev.visual_analysis_status !== statusData.visual_analysis_status
-              ? {
-                  ...prev,
-                  visual_analysis_status: statusData.visual_analysis_status,
-                }
-              : prev
-          );
+          setRealAudioRecord((prev) => {
+            if (!prev || prev.id !== currentRecordId) return prev;
+            const nextStatus = statusData.visual_analysis_status ?? prev.visual_analysis_status;
+            const nextStep1Status =
+              statusData.visual_analysis_step1_status ?? prev.visual_analysis_step1_status;
+            const nextStep2Status =
+              statusData.visual_analysis_step2_status ?? prev.visual_analysis_step2_status;
+            const nextGeminiStep1 =
+              statusData.visual_analysis_gemini_step1 ?? prev.visual_analysis_gemini_step1;
+            const nextGroqStep2 =
+              statusData.visual_analysis_groq_step2 ?? prev.visual_analysis_groq_step2;
+
+            return {
+              ...prev,
+              visual_analysis_status: nextStatus,
+              visual_analysis_step1_status: nextStep1Status,
+              visual_analysis_step2_status: nextStep2Status,
+              visual_analysis_gemini_step1: nextGeminiStep1,
+              visual_analysis_groq_step2: nextGroqStep2,
+            };
+          });
         }
       } catch (err) {
         console.warn("[ContentAnalysisPage] Visual polling tick error:", err);
@@ -880,6 +948,8 @@ export const ContentAnalysisPage: React.FC = () => {
   }, [
     realAudioRecord?.id,
     realAudioRecord?.visual_analysis_status,
+    realAudioRecord?.visual_analysis_step1_status,
+    realAudioRecord?.visual_analysis_step2_status,
     isPreparingVisualFrames,
   ]);
 
@@ -2031,6 +2101,10 @@ export const ContentAnalysisPage: React.FC = () => {
                   <div className="lg:col-span-8">
                     <VisualAnalysis
                       realData={realAudioRecord.visual_analysis}
+                      geminiStep1Data={realAudioRecord.visual_analysis_gemini_step1}
+                      groqStep2Data={realAudioRecord.visual_analysis_groq_step2}
+                      step1Status={realAudioRecord.visual_analysis_step1_status}
+                      step2Status={realAudioRecord.visual_analysis_step2_status}
                       status={realAudioRecord.visual_analysis_status}
                       errorMessage={
                         normalizeVisualStatus(realAudioRecord.visual_analysis_status) === "completed"

@@ -342,6 +342,49 @@ export type VisualAnalysisStatus =
   | "failed"
   | (string & {});
 
+export type VisualStep1Status =
+  | "pending"
+  | "processing"
+  | "completed"
+  | "failed"
+  | (string & {});
+
+export type VisualStep2Status =
+  | "pending"
+  | "blocked"
+  | "processing"
+  | "completed"
+  | "failed"
+  | (string & {});
+
+export interface VisualGeminiOutfitChange {
+  outfit_number?: number;
+  start_time_seconds?: number | null;
+  end_time_seconds?: number | null;
+  estimated_start_seconds?: number | null;
+  estimated_end_seconds?: number | null;
+  estimated_start_time_seconds?: number | null;
+  estimated_end_time_seconds?: number | null;
+  start_timestamp?: string | number | null;
+  end_timestamp?: string | number | null;
+  outfit_description?: string | null;
+  description?: string | null;
+  clothing?: string | string[] | null;
+  footwear?: string | string[] | null;
+  accessories?: string | string[] | null;
+  hairstyle?: string | string[] | null;
+  evidence_notes?: string | string[] | null;
+  notes?: string | null;
+}
+
+export interface VisualGeminiStep1Result {
+  outfit_changes?: VisualGeminiOutfitChange[];
+  summary?: string | null;
+  video_overview?: VisualBackendOverview;
+  analysis_metadata?: VisualBackendMetadata;
+  [key: string]: unknown;
+}
+
 export interface FramePathItem {
   path: string;
   timestamp_seconds: number;
@@ -584,12 +627,16 @@ export interface ContentAnalysisRecord {
   audio_analysis_started_at?: string | null;
   audio_analysis_completed_at?: string | null;
 
-  // Dedicated Visual Analysis columns
+  // Dedicated Visual Analysis columns (sequential Step 1 Gemini + Step 2 Groq + final combined)
   visual_analysis?: VisualBackendResult | null;
   visual_analysis_status?: VisualAnalysisStatus | null;
   visual_analysis_error?: string | null;
   visual_analysis_started_at?: string | null;
   visual_analysis_completed_at?: string | null;
+  visual_analysis_gemini_step1?: VisualGeminiStep1Result | null;
+  visual_analysis_groq_step2?: VisualBackendResult | Record<string, unknown> | null;
+  visual_analysis_step1_status?: VisualStep1Status | null;
+  visual_analysis_step2_status?: VisualStep2Status | null;
 
   // Dedicated On-Screen Text Extraction columns
   text_extraction?: TextExtractionBackendResult | null;
@@ -631,6 +678,10 @@ export interface AnalysisHistoryItem {
   visualAnalysis?: VisualBackendResult | null;
   visualAnalysisStatus?: VisualAnalysisStatus | null;
   visualAnalysisError?: string | null;
+  visualAnalysisGeminiStep1?: VisualGeminiStep1Result | null;
+  visualAnalysisGroqStep2?: VisualBackendResult | Record<string, unknown> | null;
+  visualAnalysisStep1Status?: VisualStep1Status | null;
+  visualAnalysisStep2Status?: VisualStep2Status | null;
 
   // Real On-Screen Text Extraction metadata
   textExtraction?: TextExtractionBackendResult | null;

@@ -6,6 +6,9 @@ import {
   AudioAnalysisStatus,
   VisualBackendResult,
   VisualAnalysisStatus,
+  VisualGeminiStep1Result,
+  VisualStep1Status,
+  VisualStep2Status,
   TextExtractionBackendResult,
   TextExtractionStatus,
   OriginalScriptBackendResult,
@@ -245,10 +248,36 @@ class ContentAnalysisService {
     return null;
   }
 
+  private normalizeJsonObject<T>(raw: unknown): T | null {
+    if (!raw) return null;
+    if (typeof raw === "string") {
+      try {
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === "object" ? (parsed as T) : null;
+      } catch {
+        return null;
+      }
+    }
+    if (typeof raw === "object") {
+      return raw as T;
+    }
+    return null;
+  }
+
   private normalizeRecord(row: any): ContentAnalysisRecord {
     return {
       ...(row as ContentAnalysisRecord),
       visual_analysis: this.normalizeVisualAnalysis(row?.visual_analysis),
+      visual_analysis_gemini_step1: this.normalizeJsonObject<VisualGeminiStep1Result>(
+        row?.visual_analysis_gemini_step1
+      ),
+      visual_analysis_groq_step2: this.normalizeJsonObject<
+        VisualBackendResult | Record<string, unknown>
+      >(row?.visual_analysis_groq_step2),
+      visual_analysis_step1_status:
+        (row?.visual_analysis_step1_status as VisualStep1Status) || null,
+      visual_analysis_step2_status:
+        (row?.visual_analysis_step2_status as VisualStep2Status) || null,
       text_extraction: this.normalizeTextExtraction(row?.text_extraction),
       original_script: this.normalizeOriginalScript(row?.original_script),
     };
@@ -1921,6 +1950,10 @@ class ContentAnalysisService {
     visual_analysis: VisualBackendResult | null;
     visual_analysis_status: VisualAnalysisStatus | null;
     visual_analysis_error: string | null;
+    visual_analysis_gemini_step1: VisualGeminiStep1Result | null;
+    visual_analysis_groq_step2: VisualBackendResult | Record<string, unknown> | null;
+    visual_analysis_step1_status: VisualStep1Status | null;
+    visual_analysis_step2_status: VisualStep2Status | null;
   } | null> {
     try {
       const {
@@ -1934,7 +1967,9 @@ class ContentAnalysisService {
 
       const { data, error } = await supabase
         .from(TABLE_CONTENT_ANALYSES)
-        .select("visual_analysis, visual_analysis_status, visual_analysis_error")
+        .select(
+          "visual_analysis, visual_analysis_status, visual_analysis_error, visual_analysis_gemini_step1, visual_analysis_groq_step2, visual_analysis_step1_status, visual_analysis_step2_status"
+        )
         .eq("id", analysisId)
         .eq("user_id", session.user.id)
         .single();
@@ -1947,6 +1982,16 @@ class ContentAnalysisService {
         visual_analysis: this.normalizeVisualAnalysis(data.visual_analysis),
         visual_analysis_status: (data.visual_analysis_status as VisualAnalysisStatus) || null,
         visual_analysis_error: (data.visual_analysis_error as string) || null,
+        visual_analysis_gemini_step1: this.normalizeJsonObject<VisualGeminiStep1Result>(
+          data.visual_analysis_gemini_step1
+        ),
+        visual_analysis_groq_step2: this.normalizeJsonObject<
+          VisualBackendResult | Record<string, unknown>
+        >(data.visual_analysis_groq_step2),
+        visual_analysis_step1_status:
+          (data.visual_analysis_step1_status as VisualStep1Status) || null,
+        visual_analysis_step2_status:
+          (data.visual_analysis_step2_status as VisualStep2Status) || null,
       };
     } catch {
       return null;
@@ -2444,6 +2489,10 @@ class ContentAnalysisService {
       visualAnalysis: record.visual_analysis || null,
       visualAnalysisStatus: record.visual_analysis_status || null,
       visualAnalysisError: record.visual_analysis_error || null,
+      visualAnalysisGeminiStep1: record.visual_analysis_gemini_step1 || null,
+      visualAnalysisGroqStep2: record.visual_analysis_groq_step2 || null,
+      visualAnalysisStep1Status: record.visual_analysis_step1_status || null,
+      visualAnalysisStep2Status: record.visual_analysis_step2_status || null,
       textExtraction: record.text_extraction || null,
       textExtractionStatus: record.text_extraction_status || null,
       textExtractionError: record.text_extraction_error || null,

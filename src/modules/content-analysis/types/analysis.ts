@@ -421,6 +421,47 @@ export interface VisualBackendResult {
 }
 
 /**
+ * Status of the on-screen text extraction pipeline in Supabase
+ */
+export type TextExtractionStatus =
+  | "queued"
+  | "pending"
+  | "processing"
+  | "groq_processing"
+  | "completed"
+  | "failed"
+  | (string & {});
+
+export interface TextExtractionBackendSegment {
+  start_time_seconds: number;
+  end_time_seconds: number;
+  extracted_text: string;
+  position_on_screen?: string | null;
+  text_type?: string | null;
+  readability?: string | null;
+  uncertain_characters?: string | null;
+  notes?: string | null;
+}
+
+export interface TextExtractionBackendMetadata {
+  warnings?: string[];
+  provider?: string;
+  model?: string;
+  source?: string;
+  analyzed_at?: string;
+}
+
+/**
+ * Exact response structure returned by the analyze-text Supabase Edge Function
+ */
+export interface TextExtractionBackendResult {
+  video_text_summary?: string | null;
+  text_segments: TextExtractionBackendSegment[];
+  languages_visible?: string[];
+  analysis_metadata?: TextExtractionBackendMetadata;
+}
+
+/**
  * Database record matching public.content_analyses table in Supabase.
  */
 export interface ContentAnalysisRecord {
@@ -450,6 +491,13 @@ export interface ContentAnalysisRecord {
   visual_analysis_error?: string | null;
   visual_analysis_started_at?: string | null;
   visual_analysis_completed_at?: string | null;
+
+  // Dedicated On-Screen Text Extraction columns
+  text_extraction?: TextExtractionBackendResult | null;
+  text_extraction_status?: TextExtractionStatus | null;
+  text_extraction_error?: string | null;
+  text_extraction_started_at?: string | null;
+  text_extraction_completed_at?: string | null;
 }
 
 export interface AnalysisHistoryItem {
@@ -477,6 +525,11 @@ export interface AnalysisHistoryItem {
   visualAnalysis?: VisualBackendResult | null;
   visualAnalysisStatus?: VisualAnalysisStatus | null;
   visualAnalysisError?: string | null;
+
+  // Real On-Screen Text Extraction metadata
+  textExtraction?: TextExtractionBackendResult | null;
+  textExtractionStatus?: TextExtractionStatus | null;
+  textExtractionError?: string | null;
 }
 
 export type AnalysisTabType =

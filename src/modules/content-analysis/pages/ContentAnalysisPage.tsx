@@ -24,6 +24,7 @@ import {
   ContentAnalysisRecord,
   AudioBackendResult,
   VisualAnalysisStatus,
+  TextExtractionStatus,
 } from "../types/analysis";
 import { contentAnalysisService } from "../services/contentAnalysisService";
 import { supabase } from "@/lib/supabase";
@@ -99,6 +100,10 @@ export const ContentAnalysisPage: React.FC = () => {
   const [isPreparingVisualFrames, setIsPreparingVisualFrames] = useState<boolean>(false);
   const [visualAnalysisError, setVisualAnalysisError] = useState<string | null>(null);
   const [visualProgressMessage, setVisualProgressMessage] = useState<string | null>(null);
+  const [isExtractingText, setIsExtractingText] = useState<boolean>(false);
+  const [isPreparingTextFrames, setIsPreparingTextFrames] = useState<boolean>(false);
+  const [textExtractionError, setTextExtractionError] = useState<string | null>(null);
+  const [textProgressMessage, setTextProgressMessage] = useState<string | null>(null);
 
   const [activeTab, setActiveTabState] = useState<AnalysisTabType>(getInitialActiveTab);
   const setActiveTab = (tab: AnalysisTabType) => {
@@ -126,6 +131,9 @@ export const ContentAnalysisPage: React.FC = () => {
   const visualPollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const activeVisualRunIdRef = useRef<string | null>(null);
   const isPreparingVisualFramesRef = useRef<boolean>(false);
+  const textPollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const activeTextRunIdRef = useRef<string | null>(null);
+  const isPreparingTextFramesRef = useRef<boolean>(false);
   const selectionRequestIdRef = useRef<number>(0);
 
   const setPreparingVisualFramesState = (value: boolean) => {
@@ -133,10 +141,22 @@ export const ContentAnalysisPage: React.FC = () => {
     setIsPreparingVisualFrames(value);
   };
 
+  const setPreparingTextFramesState = (value: boolean) => {
+    isPreparingTextFramesRef.current = value;
+    setIsPreparingTextFrames(value);
+  };
+
   const stopVisualPolling = () => {
     if (visualPollingRef.current) {
       clearInterval(visualPollingRef.current);
       visualPollingRef.current = null;
+    }
+  };
+
+  const stopTextPolling = () => {
+    if (textPollingRef.current) {
+      clearInterval(textPollingRef.current);
+      textPollingRef.current = null;
     }
   };
 
@@ -179,13 +199,47 @@ export const ContentAnalysisPage: React.FC = () => {
       setVisualProgressMessage(null);
       setVisualAnalysisError(null);
     }
+
+    const tStatus = normalizeVisualStatus(record.text_extraction_status);
+    const hasSavedTextResult = Boolean(record.text_extraction);
+
+    if (tStatus === "completed" || (hasSavedTextResult && tStatus !== "failed")) {
+      stopTextPolling();
+      activeTextRunIdRef.current = null;
+      setPreparingTextFramesState(false);
+      setIsExtractingText(false);
+      setTextProgressMessage(null);
+      setTextExtractionError(null);
+    } else if (isVisualActiveBackendStatus(tStatus)) {
+      setPreparingTextFramesState(false);
+      setIsExtractingText(true);
+      setTextProgressMessage(null);
+      setTextExtractionError(null);
+    } else if (tStatus === "failed") {
+      stopTextPolling();
+      activeTextRunIdRef.current = null;
+      setPreparingTextFramesState(false);
+      setIsExtractingText(false);
+      setTextProgressMessage(null);
+      setTextExtractionError(record.text_extraction_error || "Previous text extraction failed.");
+    } else {
+      stopTextPolling();
+      activeTextRunIdRef.current = null;
+      setPreparingTextFramesState(false);
+      setIsExtractingText(false);
+      setTextProgressMessage(null);
+      setTextExtractionError(null);
+    }
   };
 
   useEffect(() => {
     return () => {
       stopVisualPolling();
+      stopTextPolling();
       activeVisualRunIdRef.current = null;
+      activeTextRunIdRef.current = null;
       isPreparingVisualFramesRef.current = false;
+      isPreparingTextFramesRef.current = false;
     };
   }, []);
 
@@ -205,7 +259,11 @@ export const ContentAnalysisPage: React.FC = () => {
 
         // Check if there was an active analysis stored before page reload
         const savedActiveId = localStorage.getItem(ACTIVE_ANALYSIS_STORAGE_KEY);
-        if (savedActiveId && !isPreparingVisualFramesRef.current) {
+        if (
+          savedActiveId &&
+          !isPreparingVisualFramesRef.current &&
+          !isPreparingTextFramesRef.current
+        ) {
           // Fetch fresh row directly from public.content_analyses for savedActiveId
           const freshRecord = await contentAnalysisService.fetchAnalysisById(savedActiveId);
           if (!isCurrent) return;
@@ -239,13 +297,19 @@ export const ContentAnalysisPage: React.FC = () => {
   // 2. Upload success callback from VideoUploader
   const handleUploadSuccess = (record: ContentAnalysisRecord) => {
     stopVisualPolling();
+    stopTextPolling();
     activeVisualRunIdRef.current = null;
+    activeTextRunIdRef.current = null;
     setPreparingVisualFramesState(false);
+    setPreparingTextFramesState(false);
     setIsAnalyzingVisual(false);
+    setIsExtractingText(false);
     setVisualProgressMessage(null);
+    setTextProgressMessage(null);
     setRealAudioRecord(record);
     setAudioAnalysisError(null);
     setVisualAnalysisError(null);
+    setTextExtractionError(null);
     localStorage.setItem(ACTIVE_ANALYSIS_STORAGE_KEY, record.id);
 
     const newItem = contentAnalysisService.mapRecordToHistoryItem(record);
@@ -690,6 +754,358 @@ export const ContentAnalysisPage: React.FC = () => {
     isPreparingVisualFrames,
   ]);
 
+  // 8. Independent On-Screen Text Extraction invocation via 'analyze-text' (explicit action only)
+  const handleExtractText = async (recordToExtract?: ContentAnalysisRecord | null) => {
+    const targetRecord = recordToExtract || realAudioRecord;
+    if (!targetRecord?.id) return;
+
+    // Never restart an already-completed extraction that has a saved result
+    const initialStatus = normalizeVisualStatus(targetRecord.text_extraction_status);
+    if (initialStatus === "completed" && targetRecord.text_extraction) {
+      hydrateRealRecordState(targetRecord);
+      setCurrentAnalysis(null);
+      setIsUploadMode(false);
+      setActiveTab("text");
+      return;
+    }
+
+    // Synchronous ref lock prevents duplicate runs across clicks, re-renders, or React Strict Mode
+    if (
+      activeTextRunIdRef.current === targetRecord.id ||
+      isPreparingTextFramesRef.current ||
+      isExtractingText
+    ) {
+      return;
+    }
+
+    activeTextRunIdRef.current = targetRecord.id;
+    stopTextPolling();
+    setIsExtractingText(true);
+    setPreparingTextFramesState(true);
+    setTextExtractionError(null);
+    setTextProgressMessage("Preparing your Reel...");
+    localStorage.setItem(ACTIVE_ANALYSIS_STORAGE_KEY, targetRecord.id);
+
+    setCurrentAnalysis(null);
+    setIsUploadMode(false);
+    setActiveTab("text");
+
+    try {
+      // 1. Confirm user is authenticated
+      const {
+        data: { session },
+        error: sessionError,
+      } = await supabase.auth.getSession();
+
+      const userId = session?.user?.id;
+      if (sessionError || !userId) {
+        throw new Error("Authentication required: Please sign in to extract on-screen text.");
+      }
+
+      // 2. Load existing DB record for this analysisId before doing anything
+      const freshDbRecord = await contentAnalysisService.fetchAnalysisById(targetRecord.id);
+      const dbStatus = normalizeVisualStatus(freshDbRecord?.text_extraction_status);
+
+      if (freshDbRecord && dbStatus === "completed" && freshDbRecord.text_extraction) {
+        hydrateRealRecordState(freshDbRecord);
+        const updatedItem = contentAnalysisService.mapRecordToHistoryItem(freshDbRecord);
+        setHistoryItems((prev) => [updatedItem, ...prev.filter((p) => p.id !== freshDbRecord.id)]);
+        return;
+      }
+
+      if (freshDbRecord && isVisualActiveBackendStatus(dbStatus)) {
+        hydrateRealRecordState(freshDbRecord);
+        const updatedItem = contentAnalysisService.mapRecordToHistoryItem(freshDbRecord);
+        setHistoryItems((prev) => [updatedItem, ...prev.filter((p) => p.id !== freshDbRecord.id)]);
+        return;
+      }
+
+      const authoritativeFilePath = freshDbRecord?.file_path || targetRecord.file_path;
+      const authoritativeDuration =
+        freshDbRecord?.duration_seconds ?? targetRecord.duration_seconds;
+
+      if (!authoritativeFilePath) {
+        throw new Error("Uploaded Reel storage path could not be found for this analysis record.");
+      }
+
+      // 3. Download original uploaded Reel from private reel-uploads bucket
+      const videoBlob = await contentAnalysisService.downloadReelVideo(authoritativeFilePath);
+
+      if (activeTextRunIdRef.current !== targetRecord.id) return;
+
+      // 4. Extract up to 3 representative JPEG frames (~10%, ~50%, ~90%, max 960px, JPEG ~0.72)
+      setTextProgressMessage("Extracting representative frames...");
+      const extractedFrames = await contentAnalysisService.extractRepresentativeFrames(
+        videoBlob,
+        authoritativeDuration
+      );
+
+      if (!extractedFrames || extractedFrames.length === 0) {
+        throw new Error(
+          "No representative frames could be extracted from your Reel. Text extraction was not started."
+        );
+      }
+
+      if (activeTextRunIdRef.current !== targetRecord.id) return;
+
+      // 5. Upload frames to private visual-analysis-frames bucket ({userId}/{analysisId}/frame-1..3.jpg)
+      setTextProgressMessage("Uploading frames for text extraction...");
+      const framePaths = await contentAnalysisService.uploadTextExtractionFrames(
+        userId,
+        targetRecord.id,
+        extractedFrames
+      );
+
+      if (!framePaths || framePaths.length === 0) {
+        throw new Error(
+          "Frame upload verification failed. Text extraction was not started."
+        );
+      }
+
+      if (activeTextRunIdRef.current !== targetRecord.id) return;
+
+      // 6. Invoke analyze-text reusing existing analysisId and validated framePaths
+      setTextProgressMessage("Submitting text extraction job...");
+      const result = await contentAnalysisService.analyzeText(targetRecord.id, framePaths);
+
+      if (activeTextRunIdRef.current !== targetRecord.id) return;
+
+      if (result.success) {
+        setPreparingTextFramesState(false);
+        setTextProgressMessage(null);
+        const newStatus: TextExtractionStatus = result.status || "queued";
+
+        setRealAudioRecord((prev) =>
+          prev && prev.id === targetRecord.id
+            ? {
+                ...prev,
+                file_path: authoritativeFilePath,
+                text_extraction_status: newStatus,
+                text_extraction_error: null,
+              }
+            : prev
+        );
+
+        if (!signedVideoUrl) {
+          const playbackUrl = await contentAnalysisService.getSignedPlaybackUrl(
+            authoritativeFilePath
+          );
+          if (playbackUrl) {
+            setSignedVideoUrl(playbackUrl);
+          }
+        }
+
+        setHistoryItems((prev) =>
+          prev.map((item) =>
+            item.id === targetRecord.id
+              ? { ...item, textExtractionStatus: newStatus, textExtractionError: null }
+              : item
+          )
+        );
+
+        if (result.text_extraction) {
+          const completedRecord = await contentAnalysisService.fetchAnalysisById(targetRecord.id);
+          const resolvedRecord: ContentAnalysisRecord = completedRecord || {
+            ...targetRecord,
+            file_path: authoritativeFilePath,
+            text_extraction: result.text_extraction,
+            text_extraction_status: "completed",
+            text_extraction_error: null,
+          };
+
+          hydrateRealRecordState(resolvedRecord);
+
+          const updatedHistoryItem = contentAnalysisService.mapRecordToHistoryItem(resolvedRecord);
+          setHistoryItems((prev) => [
+            updatedHistoryItem,
+            ...prev.filter((p) => p.id !== resolvedRecord.id),
+          ]);
+        }
+      } else {
+        const errorMsg = result.error || "On-screen text extraction was unable to complete.";
+        activeTextRunIdRef.current = null;
+        setPreparingTextFramesState(false);
+        setTextExtractionError(errorMsg);
+        setTextProgressMessage(null);
+        setIsExtractingText(false);
+
+        setRealAudioRecord((prev) =>
+          prev && prev.id === targetRecord.id
+            ? {
+                ...prev,
+                text_extraction_status: "failed",
+                text_extraction_error: errorMsg,
+              }
+            : prev
+        );
+
+        setHistoryItems((prev) =>
+          prev.map((item) =>
+            item.id === targetRecord.id
+              ? { ...item, textExtractionStatus: "failed", textExtractionError: errorMsg }
+              : item
+          )
+        );
+      }
+    } catch (err: any) {
+      if (activeTextRunIdRef.current !== targetRecord.id) return;
+      const msg = err.message || "An unexpected error occurred during text extraction.";
+      activeTextRunIdRef.current = null;
+      setPreparingTextFramesState(false);
+      setTextExtractionError(msg);
+      setTextProgressMessage(null);
+      setIsExtractingText(false);
+
+      setRealAudioRecord((prev) =>
+        prev && prev.id === targetRecord.id
+          ? {
+              ...prev,
+              text_extraction_status: "failed",
+              text_extraction_error: msg,
+            }
+          : prev
+      );
+
+      setHistoryItems((prev) =>
+        prev.map((item) =>
+          item.id === targetRecord.id
+            ? { ...item, textExtractionStatus: "failed", textExtractionError: msg }
+            : item
+        )
+      );
+    }
+  };
+
+  // 9. Retry On-Screen Text Extraction without re-uploading (reuses existing analysisId)
+  const handleRetryTextExtraction = () => {
+    if (realAudioRecord) {
+      handleExtractText(realAudioRecord);
+    }
+  };
+
+  // 10. Poll existing content_analyses record every 5 seconds ONLY when text extraction is queued/processing
+  useEffect(() => {
+    const currentRecordId = realAudioRecord?.id;
+    const currentStatus = realAudioRecord?.text_extraction_status;
+
+    if (isPreparingTextFrames) {
+      stopTextPolling();
+      return;
+    }
+
+    const normalizedStatus = normalizeVisualStatus(currentStatus);
+
+    if (
+      !currentRecordId ||
+      normalizedStatus === "completed" ||
+      normalizedStatus === "failed" ||
+      !isVisualActiveBackendStatus(normalizedStatus)
+    ) {
+      stopTextPolling();
+      return;
+    }
+
+    let isCancelled = false;
+    stopTextPolling();
+
+    const poll = async () => {
+      try {
+        const statusData = await contentAnalysisService.pollTextExtractionStatus(currentRecordId);
+        if (isCancelled || !statusData) return;
+
+        const polledStatus = normalizeVisualStatus(statusData.text_extraction_status);
+
+        if (polledStatus === "completed") {
+          stopTextPolling();
+          activeTextRunIdRef.current = null;
+          setPreparingTextFramesState(false);
+          setIsExtractingText(false);
+          setTextProgressMessage(null);
+          setTextExtractionError(null);
+
+          const freshRecord = await contentAnalysisService.fetchAnalysisById(currentRecordId);
+          if (isCancelled) return;
+
+          if (freshRecord) {
+            hydrateRealRecordState(freshRecord);
+            const updatedHistoryItem = contentAnalysisService.mapRecordToHistoryItem(freshRecord);
+            setHistoryItems((prev) => [
+              updatedHistoryItem,
+              ...prev.filter((p) => p.id !== freshRecord.id),
+            ]);
+          } else if (statusData.text_extraction) {
+            setRealAudioRecord((prev) =>
+              prev && prev.id === currentRecordId
+                ? {
+                    ...prev,
+                    text_extraction: statusData.text_extraction,
+                    text_extraction_status: "completed",
+                    text_extraction_error: null,
+                    text_extraction_started_at:
+                      statusData.text_extraction_started_at ?? prev.text_extraction_started_at,
+                    text_extraction_completed_at:
+                      statusData.text_extraction_completed_at ?? prev.text_extraction_completed_at,
+                  }
+                : prev
+            );
+          }
+        } else if (polledStatus === "failed") {
+          stopTextPolling();
+          activeTextRunIdRef.current = null;
+          setPreparingTextFramesState(false);
+          setIsExtractingText(false);
+          setTextProgressMessage(null);
+          const errorMsg =
+            statusData.text_extraction_error || "On-screen text extraction was unable to complete.";
+          setTextExtractionError(errorMsg);
+
+          setRealAudioRecord((prev) =>
+            prev && prev.id === currentRecordId
+              ? {
+                  ...prev,
+                  text_extraction_status: "failed",
+                  text_extraction_error: errorMsg,
+                }
+              : prev
+          );
+
+          setHistoryItems((prev) =>
+            prev.map((item) =>
+              item.id === currentRecordId
+                ? { ...item, textExtractionStatus: "failed", textExtractionError: errorMsg }
+                : item
+            )
+          );
+        } else if (statusData.text_extraction_status) {
+          setTextProgressMessage(null);
+          setRealAudioRecord((prev) =>
+            prev &&
+            prev.id === currentRecordId &&
+            prev.text_extraction_status !== statusData.text_extraction_status
+              ? {
+                  ...prev,
+                  text_extraction_status: statusData.text_extraction_status,
+                }
+              : prev
+          );
+        }
+      } catch (err) {
+        console.warn("[ContentAnalysisPage] Text extraction polling tick error:", err);
+      }
+    };
+
+    textPollingRef.current = setInterval(poll, 5000);
+
+    return () => {
+      isCancelled = true;
+      stopTextPolling();
+    };
+  }, [
+    realAudioRecord?.id,
+    realAudioRecord?.text_extraction_status,
+    isPreparingTextFrames,
+  ]);
+
   // 5. Sample Preset Demo handlers (preserved independently)
   const handleStartDemoAnalysis = (
     file: File | null,
@@ -723,11 +1139,17 @@ export const ContentAnalysisPage: React.FC = () => {
   const handleSelectHistoryItem = async (id: string) => {
     const requestId = ++selectionRequestIdRef.current;
     stopVisualPolling();
+    stopTextPolling();
     activeVisualRunIdRef.current = null;
+    activeTextRunIdRef.current = null;
     setPreparingVisualFramesState(false);
+    setPreparingTextFramesState(false);
     setIsAnalyzingVisual(false);
+    setIsExtractingText(false);
     setVisualProgressMessage(null);
+    setTextProgressMessage(null);
     setVisualAnalysisError(null);
+    setTextExtractionError(null);
 
     // A. Check if selecting a demo preset
     const presets = contentAnalysisService.getPresetReels();
@@ -763,7 +1185,7 @@ export const ContentAnalysisPage: React.FC = () => {
 
       setIsUploadMode(false);
 
-      if (activeTab !== "visual" && activeTab !== "audio") {
+      if (activeTab !== "visual" && activeTab !== "audio" && activeTab !== "text") {
         setActiveTab(record.audio_analysis_status === "completed" ? "audio" : "visual");
       }
     }
@@ -775,10 +1197,15 @@ export const ContentAnalysisPage: React.FC = () => {
     setHistoryItems((prev) => prev.filter((item) => item.id !== id));
     if (realAudioRecord?.id === id) {
       stopVisualPolling();
+      stopTextPolling();
       activeVisualRunIdRef.current = null;
+      activeTextRunIdRef.current = null;
       setPreparingVisualFramesState(false);
+      setPreparingTextFramesState(false);
       setIsAnalyzingVisual(false);
+      setIsExtractingText(false);
       setVisualProgressMessage(null);
+      setTextProgressMessage(null);
       setRealAudioRecord(null);
       setSignedVideoUrl(null);
       localStorage.removeItem(ACTIVE_ANALYSIS_STORAGE_KEY);
@@ -813,7 +1240,9 @@ export const ContentAnalysisPage: React.FC = () => {
       id: "text",
       label: "Text Extraction",
       icon: Type,
-      count: currentAnalysis?.textExtraction.totalTextElements,
+      count: realAudioRecord?.text_extraction?.text_segments?.length
+        ? `${realAudioRecord.text_extraction.text_segments.length}`
+        : currentAnalysis?.textExtraction.totalTextElements,
     },
     {
       id: "script",
@@ -1107,8 +1536,48 @@ export const ContentAnalysisPage: React.FC = () => {
                     />
                   </div>
                 </div>
+              ) : activeTab === "text" ? (
+                <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+                  {/* Left Column: Player Preview if video URL is available */}
+                  <div className="lg:col-span-4 sticky top-6">
+                    <div className="w-full max-w-sm mx-auto space-y-3">
+                      <VideoPreviewPlayer
+                        ref={playerRef}
+                        src={signedVideoUrl || undefined}
+                        durationSeconds={realAudioRecord.duration_seconds || 30}
+                        aspectRatio="9:16"
+                      />
+                      <div className="rounded-xl border border-card-border bg-card p-3 text-xs text-text-secondary space-y-1">
+                        <p className="font-semibold text-text-primary line-clamp-1">
+                          {realAudioRecord.file_name}
+                        </p>
+                        <p className="text-[11px] text-text-muted font-mono">
+                          Click any start timestamp in the Extracted Text Timeline to jump to that moment in the video.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Right Column: On-Screen Text Extraction Results */}
+                  <div className="lg:col-span-8">
+                    <TextExtraction
+                      realData={realAudioRecord.text_extraction}
+                      status={realAudioRecord.text_extraction_status}
+                      errorMessage={
+                        normalizeVisualStatus(realAudioRecord.text_extraction_status) === "completed"
+                          ? null
+                          : textExtractionError || realAudioRecord.text_extraction_error
+                      }
+                      onRetry={handleRetryTextExtraction}
+                      onExtractText={() => handleExtractText(realAudioRecord)}
+                      isProcessing={isExtractingText}
+                      progressStepMessage={textProgressMessage}
+                      onSeek={handleSeekVideo}
+                    />
+                  </div>
+                </div>
               ) : (
-                /* Non-Audio & Non-Visual Tabs for real uploaded Reel */
+                /* Other Tabs for real uploaded Reel */
                 <div className="rounded-2xl border border-card-border bg-card p-8 sm:p-12 text-center space-y-4 shadow-card">
                   <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-primary/10 border border-primary/20 text-primary mx-auto">
                     <Sparkles className="h-7 w-7" />
@@ -1119,10 +1588,10 @@ export const ContentAnalysisPage: React.FC = () => {
                     </h3>
                     <p className="text-xs text-text-secondary leading-relaxed">
                       This analysis module will be connected in subsequent steps.
-                      Real Audio and Visual Analysis are currently connected and active for this uploaded Reel.
+                      Real Audio, Visual Analysis, and On-Screen Text Extraction are currently connected and active for this uploaded Reel.
                     </p>
                   </div>
-                  <div className="pt-2 flex items-center justify-center gap-3">
+                  <div className="pt-2 flex flex-wrap items-center justify-center gap-3">
                     <Button
                       variant="primary"
                       size="sm"
@@ -1138,6 +1607,14 @@ export const ContentAnalysisPage: React.FC = () => {
                       leftIcon={<Camera className="h-4 w-4" />}
                     >
                       View Real Visual Analysis
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setActiveTab("text")}
+                      leftIcon={<Type className="h-4 w-4" />}
+                    >
+                      View Text Extraction
                     </Button>
                   </div>
                 </div>

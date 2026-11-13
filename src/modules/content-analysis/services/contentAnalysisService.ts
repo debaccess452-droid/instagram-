@@ -6,6 +6,8 @@ import {
   AudioAnalysisStatus,
   VisualBackendResult,
   VisualAnalysisStatus,
+  TextExtractionBackendResult,
+  TextExtractionStatus,
   FramePathItem,
   ScriptTableRow,
   EditingTimelineEvent,
@@ -204,10 +206,29 @@ class ContentAnalysisService {
     return null;
   }
 
+  private normalizeTextExtraction(raw: unknown): TextExtractionBackendResult | null {
+    if (!raw) return null;
+    if (typeof raw === "string") {
+      try {
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === "object"
+          ? (parsed as TextExtractionBackendResult)
+          : null;
+      } catch {
+        return null;
+      }
+    }
+    if (typeof raw === "object") {
+      return raw as TextExtractionBackendResult;
+    }
+    return null;
+  }
+
   private normalizeRecord(row: any): ContentAnalysisRecord {
     return {
       ...(row as ContentAnalysisRecord),
       visual_analysis: this.normalizeVisualAnalysis(row?.visual_analysis),
+      text_extraction: this.normalizeTextExtraction(row?.text_extraction),
     };
   }
 
@@ -862,6 +883,201 @@ class ContentAnalysisService {
   }
 
   /**
+   * Uploads extracted JPEG frames for On-Screen Text Extraction to private visual-analysis-frames bucket
+   * using exact 1-indexed paths: {userId}/{analysisId}/frame-1.jpg, frame-2.jpg, frame-3.jpg.
+   * Verifies every upload succeeds before returning framePaths manifest.
+   */
+  public async uploadTextExtractionFrames(
+    userId: string,
+    analysisId: string,
+    frames: Array<{ blob: Blob; timestamp_seconds: number }>
+  ): Promise<FramePathItem[]> {
+    if (!userId || !analysisId) {
+      throw new Error(
+        "Authenticated user ID and analysis ID are required to upload text extraction frames."
+      );
+    }
+
+    if (!Array.isArray(frames) || frames.length === 0) {
+      throw new Error("No extracted frames available to upload for text extraction.");
+    }
+
+    const framePaths: FramePathItem[] = [];
+
+    for (let i = 0; i < Math.min(frames.length, 3); i++) {
+      const frame = frames[i];
+      if (!frame?.blob || frame.blob.size === 0) {
+        throw new Error(`Extracted frame ${i + 1} is empty and cannot be uploaded.`);
+      }
+
+      const storagePath = `${userId}/${analysisId}/frame-${i + 1}.jpg`;
+
+      const { data, error } = await supabase.storage
+        .from(VISUAL_FRAMES_BUCKET)
+        .upload(storagePath, frame.blob, {
+          contentType: "image/jpeg",
+          upsert: true,
+        });
+
+      if (error || !data?.path) {
+        throw new Error(
+          `Failed to upload text extraction frame ${i + 1} to private storage: ${
+            error?.message || "Upload did not return a path"
+          }`
+        );
+      }
+
+      framePaths.push({
+        path: storagePath,
+        timestamp_seconds: frame.timestamp_seconds,
+      });
+    }
+
+    if (framePaths.length === 0) {
+      throw new Error("No text extraction frames were uploaded successfully.");
+    }
+
+    return framePaths;
+  }
+
+  /**
+   * Invokes the deployed Supabase Edge Function 'analyze-text'
+   * for the given analysisId and validated framePaths manifest using the authenticated session.
+   * Never invokes analyze-text with an empty or fabricated framePaths array.
+   */
+  public async analyzeText(
+    analysisId: string,
+    framePaths: FramePathItem[]
+  ): Promise<{
+    success: boolean;
+    queued?: boolean;
+    status?: TextExtractionStatus;
+    analysisId?: string;
+    text_extraction?: TextExtractionBackendResult;
+    error?: string;
+  }> {
+    try {
+      const {
+        data: { session },
+        error: sessionError,
+      } = await supabase.auth.getSession();
+
+      if (sessionError || !session?.user) {
+        return {
+          success: false,
+          error: "Authentication required: Please sign in to extract on-screen text.",
+        };
+      }
+
+      if (
+        !analysisId ||
+        !Array.isArray(framePaths) ||
+        framePaths.length === 0 ||
+        framePaths.some(
+          (fp) =>
+            !fp?.path ||
+            typeof fp.timestamp_seconds !== "number" ||
+            !Number.isFinite(fp.timestamp_seconds)
+        )
+      ) {
+        return {
+          success: false,
+          error:
+            "Representative video frames could not be prepared or uploaded. Text extraction was not started. Please retry.",
+        };
+      }
+
+      const { data, error } = await supabase.functions.invoke("analyze-text", {
+        body: {
+          analysisId,
+          framePaths,
+        },
+      });
+
+      if (error) {
+        let msg = error.message;
+        if ((error as any).context && typeof (error as any).context?.json === "function") {
+          try {
+            const body = await (error as any).context.json();
+            if (body?.error) {
+              msg = body.error;
+            }
+          } catch {}
+        }
+        return {
+          success: false,
+          error: msg || "Text extraction invocation failed.",
+        };
+      }
+
+      if (data && data.success === false) {
+        return {
+          success: false,
+          error: data.error || "Text extraction returned an error.",
+        };
+      }
+
+      return {
+        success: true,
+        queued: Boolean(data?.queued),
+        status: (data?.status as TextExtractionStatus) || (data?.queued ? "queued" : "processing"),
+        analysisId: data?.analysisId || analysisId,
+        text_extraction: this.normalizeTextExtraction(data?.text_extraction) ?? undefined,
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        error: err.message || "Failed to invoke analyze-text function.",
+      };
+    }
+  }
+
+  /**
+   * Polls the user's existing content_analyses record for text extraction fields.
+   */
+  public async pollTextExtractionStatus(analysisId: string): Promise<{
+    text_extraction: TextExtractionBackendResult | null;
+    text_extraction_status: TextExtractionStatus | null;
+    text_extraction_error: string | null;
+    text_extraction_started_at: string | null;
+    text_extraction_completed_at: string | null;
+  } | null> {
+    try {
+      const {
+        data: { session },
+        error: sessionError,
+      } = await supabase.auth.getSession();
+
+      if (sessionError || !session?.user) {
+        return null;
+      }
+
+      const { data, error } = await supabase
+        .from(TABLE_CONTENT_ANALYSES)
+        .select(
+          "text_extraction, text_extraction_status, text_extraction_error, text_extraction_started_at, text_extraction_completed_at"
+        )
+        .eq("id", analysisId)
+        .eq("user_id", session.user.id)
+        .single();
+
+      if (error || !data) {
+        return null;
+      }
+
+      return {
+        text_extraction: this.normalizeTextExtraction(data.text_extraction),
+        text_extraction_status: (data.text_extraction_status as TextExtractionStatus) || null,
+        text_extraction_error: (data.text_extraction_error as string) || null,
+        text_extraction_started_at: (data.text_extraction_started_at as string) || null,
+        text_extraction_completed_at: (data.text_extraction_completed_at as string) || null,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Fetches a single ContentAnalysisRecord by ID for the authenticated user.
    */
   public async fetchAnalysisById(
@@ -942,6 +1158,9 @@ class ContentAnalysisService {
       visualAnalysis: record.visual_analysis || null,
       visualAnalysisStatus: record.visual_analysis_status || null,
       visualAnalysisError: record.visual_analysis_error || null,
+      textExtraction: record.text_extraction || null,
+      textExtractionStatus: record.text_extraction_status || null,
+      textExtractionError: record.text_extraction_error || null,
     };
   }
 

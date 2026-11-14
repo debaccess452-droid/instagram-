@@ -403,6 +403,11 @@ export interface VisualGeminiOutfitChange {
 export interface VisualGeminiStep1Result {
   outfit_changes?: VisualGeminiOutfitChange[];
   summary?: string | null;
+  subject?: string | null;
+  subject_summary?: string | null;
+  subject_description?: string | null;
+  camera_framing?: string | null;
+  camera_and_framing?: string | null;
   video_overview?: VisualBackendOverview;
   warnings?: string[] | null;
   analysis_metadata?: VisualBackendMetadata;
@@ -502,6 +507,9 @@ export interface VisualSamplingMetadata {
 export interface VisualBackendOverview {
   summary: string;
   duration_observation: string;
+  subject?: string | null;
+  camera_framing?: string | null;
+  camera_and_framing?: string | null;
 }
 
 /**

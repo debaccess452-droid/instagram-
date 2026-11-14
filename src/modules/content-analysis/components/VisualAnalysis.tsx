@@ -17,13 +17,15 @@ import {
   RotateCcw,
   Info,
   Clock,
-  Eye,
   ShieldAlert,
+  ChevronDown,
+  ChevronUp,
 } from "lucide-react";
 import {
   VisualAnalysisData,
   VisualScene,
   VisualBackendResult,
+  VisualBackendScene,
   VisualAnalysisStatus,
   VisualGeminiStep1Result,
   VisualGeminiOutfitChange,
@@ -96,6 +98,9 @@ function formatTimeRange(start: number, end: number): string {
 }
 
 function formatPreciseTimeRange(start: number, end: number): string {
+  if (Math.abs(start - end) < 0.001) {
+    return formatSecondsToPreciseTimestamp(start);
+  }
   return `${formatSecondsToPreciseTimestamp(start)}–${formatSecondsToPreciseTimestamp(end)}`;
 }
 
@@ -178,6 +183,533 @@ function getSceneVisualDescription(scene: VisualScene): string {
   return parts.join(" ");
 }
 
+interface SynthesizedVisualShot {
+  shotNumber: number;
+  startSec: number;
+  endSec: number | null;
+  timestampLabel: string;
+  description: string;
+  geminiNotes: string | null;
+  groqEnrichment: string | null;
+  matchedFrameCount: number;
+  sourceKind: "gemini_plus_groq" | "gemini_only" | "groq_grouped";
+  hairstyleNote: string | null;
+  warnings: string[];
+}
+
+function normalizeComparisonText(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isPhraseCoveredInText(candidate: string, baseText: string): boolean {
+  const normCandidate = normalizeComparisonText(candidate);
+  const normBase = normalizeComparisonText(baseText);
+  if (!normCandidate) return true;
+  if (!normBase) return false;
+  if (normBase.includes(normCandidate)) return true;
+
+  const words = normCandidate.split(" ").filter((w) => w.length > 2);
+  if (words.length === 0) return true;
+  const matchedWords = words.filter((w) => normBase.includes(w));
+  return matchedWords.length / words.length >= 0.78;
+}
+
+function dedupeConciseSentences(items: string[]): string[] {
+  const seen: string[] = [];
+  const result: string[] = [];
+
+  for (const raw of items) {
+    const cleaned = raw.trim().replace(/\s+/g, " ");
+    if (!cleaned) continue;
+    const isDup = seen.some(
+      (prev) =>
+        isPhraseCoveredInText(cleaned, prev) || isPhraseCoveredInText(prev, cleaned)
+    );
+    if (!isDup) {
+      seen.push(cleaned);
+      result.push(cleaned);
+    }
+  }
+
+  return result;
+}
+
+function ensureSentencePunctuation(text: string): string {
+  const trimmed = text.trim();
+  if (!trimmed) return "";
+  return /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`;
+}
+
+function formatShotNumberList(nums: number[]): string {
+  if (nums.length === 0) return "";
+  if (nums.length === 1) return `${nums[0]}`;
+  if (nums.length === 2) return `${nums[0]} and ${nums[1]}`;
+  return `${nums.slice(0, -1).join(", ")}, and ${nums[nums.length - 1]}`;
+}
+
+function buildSynthesizedShots(
+  geminiChanges: VisualGeminiOutfitChange[],
+  groqScenes: VisualBackendScene[]
+): SynthesizedVisualShot[] {
+  const sortedScenes = [...groqScenes].sort(
+    (a, b) => (a.start_time_seconds ?? 0) - (b.start_time_seconds ?? 0)
+  );
+
+  if (geminiChanges.length > 0) {
+    const parsedLooks = geminiChanges
+      .map((item, idx) => {
+        const lookNum = item.look_number ?? item.outfit_number ?? idx + 1;
+        const startSec = parseFlexibleSeconds(
+          item.start_time ??
+            item.start_time_seconds ??
+            item.estimated_start_time_seconds ??
+            item.estimated_start_seconds ??
+            item.start_timestamp
+        );
+        const endSec = parseFlexibleSeconds(
+          item.end_time ??
+            item.end_time_seconds ??
+            item.estimated_end_time_seconds ??
+            item.estimated_end_seconds ??
+            item.end_timestamp
+        );
+        return { item, idx, lookNum, startSec, endSec };
+      })
+      .sort((a, b) => {
+        const sa = a.startSec ?? Number.MAX_SAFE_INTEGER;
+        const sb = b.startSec ?? Number.MAX_SAFE_INTEGER;
+        if (sa !== sb) return sa - sb;
+        return a.lookNum - b.lookNum;
+      });
+
+    // Map each Groq sampled-frame observation to at most ONE matching Gemini look
+    const matchedByLookIndex = new Map<number, VisualBackendScene[]>();
+    parsedLooks.forEach((_, idx) => matchedByLookIndex.set(idx, []));
+
+    for (const scene of sortedScenes) {
+      const sStart = Number(scene.start_time_seconds ?? 0);
+      const sEnd = Number(scene.end_time_seconds ?? sStart);
+      const sMid = (sStart + sEnd) / 2;
+
+      let bestLookIdx = -1;
+      let bestScore = -1;
+
+      for (let i = 0; i < parsedLooks.length; i++) {
+        const lStart = parsedLooks[i].startSec;
+        const lEnd = parsedLooks[i].endSec ?? lStart;
+        if (lStart === null || lEnd === null) continue;
+
+        const lo = Math.min(lStart, lEnd);
+        const hi = Math.max(lStart, lEnd);
+        const overlap = Math.min(hi, Math.max(sStart, sEnd)) - Math.max(lo, Math.min(sStart, sEnd));
+
+        if (overlap > 0) {
+          const score = 100 + overlap;
+          if (score > bestScore) {
+            bestScore = score;
+            bestLookIdx = i;
+          }
+        } else if (sMid >= lo - 0.15 && sMid <= hi + 0.15) {
+          const lookMid = (lo + hi) / 2;
+          const dist = Math.abs(sMid - lookMid);
+          const score = 50 - dist;
+          if (score > bestScore) {
+            bestScore = score;
+            bestLookIdx = i;
+          }
+        }
+      }
+
+      if (bestLookIdx === -1) {
+        let closestDist = Infinity;
+        for (let i = 0; i < parsedLooks.length; i++) {
+          const lStart = parsedLooks[i].startSec;
+          const lEnd = parsedLooks[i].endSec ?? lStart;
+          if (lStart === null || lEnd === null) continue;
+          const lo = Math.min(lStart, lEnd);
+          const hi = Math.max(lStart, lEnd);
+          const dist = sMid < lo ? lo - sMid : sMid > hi ? sMid - hi : 0;
+          if (dist < closestDist && dist <= 0.45) {
+            closestDist = dist;
+            bestLookIdx = i;
+          }
+        }
+      }
+
+      if (bestLookIdx !== -1) {
+        matchedByLookIndex.get(bestLookIdx)?.push(scene);
+      }
+    }
+
+    return parsedLooks.map(({ item, idx, lookNum, startSec, endSec }, orderIdx) => {
+      const resolvedStart = startSec ?? 0;
+      const resolvedEnd = endSec;
+      const timestampLabel =
+        startSec !== null && resolvedEnd !== null
+          ? formatPreciseTimeRange(startSec, resolvedEnd)
+          : startSec !== null
+          ? formatSecondsToPreciseTimestamp(startSec)
+          : item.start_time || item.end_time || item.start_timestamp || item.end_timestamp
+          ? item.end_time && String(item.end_time) !== String(item.start_time)
+            ? `${item.start_time ?? item.start_timestamp ?? "?"}–${
+                item.end_time ?? item.end_timestamp ?? "?"
+              }`
+            : `${item.start_time ?? item.start_timestamp ?? "?"}`
+          : "00:00.000";
+
+      const baseDesc =
+        formatOutfitDetailValue(item.description ?? item.outfit_description) || "";
+      const hairstyle = formatOutfitDetailValue(item.hairstyle);
+      const clothing = formatOutfitDetailValue(item.clothing);
+      const footwear = formatOutfitDetailValue(item.footwear);
+      const accessories = formatOutfitDetailValue(item.accessories);
+      const visibleEvidence = formatOutfitDetailValue(
+        item.visible_evidence ?? item.evidence_notes ?? item.notes
+      );
+
+      const descParts: string[] = [];
+      if (baseDesc) descParts.push(ensureSentencePunctuation(baseDesc));
+      let accumulated = descParts.join(" ");
+
+      const extraAttrs = [clothing, footwear, accessories].filter(
+        (v): v is string => Boolean(v)
+      );
+      const unseenAttrs = extraAttrs.filter(
+        (attr) => !isPhraseCoveredInText(attr, accumulated)
+      );
+      if (unseenAttrs.length > 0) {
+        descParts.push(ensureSentencePunctuation(unseenAttrs.join(", ")));
+        accumulated = descParts.join(" ");
+      }
+
+      const matchedScenes = matchedByLookIndex.get(idx) || [];
+      const groqActions: string[] = [];
+      const groqClothingExtras: string[] = [];
+
+      for (const sc of matchedScenes) {
+        for (const subj of sc.visible_subjects || []) {
+          if (subj.visible_action && !/not clearly visible|none/i.test(subj.visible_action)) {
+            groqActions.push(ensureSentencePunctuation(subj.visible_action));
+          }
+          if (subj.clothing && !isPhraseCoveredInText(subj.clothing, accumulated)) {
+            groqClothingExtras.push(subj.clothing.trim());
+          }
+        }
+      }
+
+      const uniqueActions = dedupeConciseSentences(groqActions).slice(0, 2);
+      const uniqueClothingExtras = dedupeConciseSentences(groqClothingExtras).slice(0, 1);
+
+      const groqEnrichmentParts: string[] = [];
+      if (uniqueClothingExtras.length > 0) {
+        groqEnrichmentParts.push(ensureSentencePunctuation(uniqueClothingExtras.join(" ")));
+      }
+      if (uniqueActions.length > 0) {
+        groqEnrichmentParts.push(uniqueActions.join(" "));
+      }
+
+      const groqEnrichment =
+        groqEnrichmentParts.length > 0 ? groqEnrichmentParts.join(" ") : null;
+
+      // Keep main shot description readable: include action if concise and not already in Gemini text
+      const mainParts = [...descParts];
+      if (
+        uniqueActions.length > 0 &&
+        !isPhraseCoveredInText(uniqueActions[0], accumulated)
+      ) {
+        mainParts.push(uniqueActions[0]);
+      }
+
+      const finalDescription =
+        mainParts.join(" ").trim() ||
+        groqEnrichment ||
+        "Outfit appearance observed in the Reel timeline.";
+
+      const itemWarnings = Array.isArray(item.warnings)
+        ? item.warnings.filter((w) => typeof w === "string" && w.trim().length > 0)
+        : [];
+
+      return {
+        shotNumber: typeof lookNum === "number" && lookNum > 0 ? lookNum : orderIdx + 1,
+        startSec: resolvedStart,
+        endSec: resolvedEnd,
+        timestampLabel,
+        description: finalDescription,
+        geminiNotes:
+          visibleEvidence && !isPhraseCoveredInText(visibleEvidence, finalDescription)
+            ? visibleEvidence
+            : null,
+        groqEnrichment,
+        matchedFrameCount: matchedScenes.length,
+        sourceKind:
+          matchedScenes.length > 0 ? "gemini_plus_groq" : "gemini_only",
+        hairstyleNote: hairstyle,
+        warnings: itemWarnings,
+      };
+    });
+  }
+
+  // Fallback when Gemini Step 1 outfit timeline is unavailable:
+  // Group consecutive near-identical sampled-frame observations instead of showing 14 separate cards
+  const grouped: SynthesizedVisualShot[] = [];
+
+  for (const scene of sortedScenes) {
+    const scClothing = (scene.visible_subjects || [])
+      .map((s) => s.clothing)
+      .filter(Boolean)
+      .join(", ");
+    const scAction = (scene.visible_subjects || [])
+      .map((s) => s.visible_action)
+      .filter(Boolean)
+      .join(" ");
+
+    const last = grouped[grouped.length - 1];
+    const isSameOutfitAsPrev =
+      last &&
+      scClothing &&
+      isPhraseCoveredInText(scClothing, last.description) &&
+      isPhraseCoveredInText(last.description, scClothing + " " + (last.groqEnrichment || ""));
+
+    if (last && isSameOutfitAsPrev) {
+      last.endSec = Math.max(
+        last.endSec ?? last.startSec,
+        scene.end_time_seconds ?? scene.start_time_seconds ?? last.startSec
+      );
+      last.timestampLabel = formatPreciseTimeRange(last.startSec, last.endSec);
+      last.matchedFrameCount += 1;
+      if (scAction && !isPhraseCoveredInText(scAction, last.description)) {
+        last.groqEnrichment = last.groqEnrichment
+          ? `${last.groqEnrichment} ${ensureSentencePunctuation(scAction)}`
+          : ensureSentencePunctuation(scAction);
+      }
+      continue;
+    }
+
+    const start = Number(scene.start_time_seconds ?? 0);
+    const end = Number(scene.end_time_seconds ?? start);
+    const desc = scClothing
+      ? ensureSentencePunctuation(scClothing)
+      : scene.scene_description || "Observed visual segment from sampled frames.";
+
+    grouped.push({
+      shotNumber: grouped.length + 1,
+      startSec: start,
+      endSec: end,
+      timestampLabel: formatPreciseTimeRange(start, end),
+      description: desc,
+      geminiNotes: null,
+      groqEnrichment:
+        scAction && !isPhraseCoveredInText(scAction, desc)
+          ? ensureSentencePunctuation(scAction)
+          : null,
+      matchedFrameCount: 1,
+      sourceKind: "groq_grouped",
+      hairstyleNote: null,
+      warnings: [],
+    });
+  }
+
+  return grouped;
+}
+
+function buildSubjectSummaryText(
+  geminiStep1Data: VisualGeminiStep1Result | null,
+  groqStep2Data: VisualBackendResult | Record<string, unknown> | null,
+  realData: VisualBackendResult,
+  shots: SynthesizedVisualShot[]
+): string {
+  const groqObj =
+    groqStep2Data && typeof groqStep2Data === "object"
+      ? (groqStep2Data as Record<string, unknown>)
+      : null;
+
+  const explicit =
+    (typeof geminiStep1Data?.subject_summary === "string" &&
+      geminiStep1Data.subject_summary.trim()) ||
+    (typeof geminiStep1Data?.subject_description === "string" &&
+      geminiStep1Data.subject_description.trim()) ||
+    (typeof geminiStep1Data?.subject === "string" && geminiStep1Data.subject.trim()) ||
+    (typeof realData.video_overview?.subject === "string" &&
+      realData.video_overview.subject.trim()) ||
+    (groqObj && typeof groqObj.subject === "string" && groqObj.subject.trim()) ||
+    (groqObj &&
+      typeof groqObj.subject_summary === "string" &&
+      groqObj.subject_summary.trim()) ||
+    null;
+
+  if (explicit) return explicit;
+
+  const scenes = realData.scenes || [];
+  const rawAppearances: string[] = [];
+  for (const sc of scenes) {
+    for (const subj of sc.visible_subjects || []) {
+      const app = String(subj.visible_appearance || "").trim();
+      if (
+        app &&
+        !/not clearly visible|unable to determine/i.test(app) &&
+        app.length > 4
+      ) {
+        rawAppearances.push(app);
+      }
+    }
+  }
+
+  const uniqueAppearances = dedupeConciseSentences(rawAppearances);
+  const baseAppearance =
+    uniqueAppearances.length > 0
+      ? ensureSentencePunctuation(uniqueAppearances[0])
+      : "";
+
+  // Summarize hairstyle progression across chronological shots if available
+  const downShots: number[] = [];
+  const upShots: number[] = [];
+  const otherHairNotes: string[] = [];
+
+  for (const shot of shots) {
+    const hairSource = `${shot.hairstyleNote || ""} ${shot.description}`.trim();
+    if (!hairSource) continue;
+    const lower = hairSource.toLowerCase();
+    if (/(pulled back|updo|ponytail|bun|tied up|pinned back)/i.test(lower)) {
+      upShots.push(shot.shotNumber);
+    } else if (/(worn down|hair down|loose waves|in waves|voluminous waves|curls)/i.test(lower)) {
+      downShots.push(shot.shotNumber);
+    } else if (shot.hairstyleNote) {
+      otherHairNotes.push(shot.hairstyleNote);
+    }
+  }
+
+  const parts: string[] = [];
+  if (baseAppearance) {
+    parts.push(baseAppearance);
+  }
+
+  if (downShots.length > 0 && upShots.length > 0) {
+    const combinedText = `${baseAppearance} ${shots.map((s) => s.description).join(" ")}`;
+    const hairPronoun = /(woman|girl|female|\bshe\b|\bher\b)/i.test(combinedText)
+      ? "Her hair"
+      : "Hair";
+    parts.push(
+      `${hairPronoun} is worn down in ${
+        downShots.length === 1 ? "shot" : "shots"
+      } ${formatShotNumberList(downShots)}, and pulled back in ${
+        upShots.length === 1 ? "shot" : "shots"
+      } ${formatShotNumberList(upShots)}.`
+    );
+  } else if (otherHairNotes.length > 0) {
+    const uniqueHair = dedupeConciseSentences(otherHairNotes);
+    if (uniqueHair.length > 0 && !isPhraseCoveredInText(uniqueHair[0], baseAppearance)) {
+      parts.push(ensureSentencePunctuation(uniqueHair[0]));
+    }
+  }
+
+  if (parts.length > 0) {
+    return parts.join(" ");
+  }
+
+  return "Single primary subject observed in frame; no additional appearance details recorded.";
+}
+
+function buildCameraFramingSummaryText(
+  geminiStep1Data: VisualGeminiStep1Result | null,
+  groqStep2Data: VisualBackendResult | Record<string, unknown> | null,
+  realData: VisualBackendResult
+): string {
+  const groqObj =
+    groqStep2Data && typeof groqStep2Data === "object"
+      ? (groqStep2Data as Record<string, unknown>)
+      : null;
+
+  const explicit =
+    (typeof geminiStep1Data?.camera_and_framing === "string" &&
+      geminiStep1Data.camera_and_framing.trim()) ||
+    (typeof geminiStep1Data?.camera_framing === "string" &&
+      geminiStep1Data.camera_framing.trim()) ||
+    (typeof realData.video_overview?.camera_and_framing === "string" &&
+      realData.video_overview.camera_and_framing.trim()) ||
+    (typeof realData.video_overview?.camera_framing === "string" &&
+      realData.video_overview.camera_framing.trim()) ||
+    (groqObj &&
+      typeof groqObj.camera_and_framing === "string" &&
+      groqObj.camera_and_framing.trim()) ||
+    (groqObj &&
+      typeof groqObj.camera_framing === "string" &&
+      groqObj.camera_framing.trim()) ||
+    null;
+
+  if (explicit) return explicit;
+
+  const scenes = realData.scenes || [];
+  const framings = Array.from(
+    new Set(
+      [
+        ...scenes.map((s) => s.camera?.shot_framing),
+        ...(geminiStep1Data?.outfit_changes || []).map((c) => c.camera_framing),
+      ]
+        .map((v) => String(v || "").trim().replace(/[-_]+/g, " "))
+        .filter((v) => v && !/not clearly specified|unknown/i.test(v))
+    )
+  );
+  const angles = Array.from(
+    new Set(
+      scenes
+        .map((s) => String(s.camera?.camera_angle || "").trim().replace(/[-_]+/g, " "))
+        .filter((v) => v && !/not clearly specified|unknown/i.test(v))
+    )
+  );
+  const movements = Array.from(
+    new Set(
+      scenes
+        .map((s) => String(s.camera?.camera_movement || "").trim().replace(/[-_]+/g, " "))
+        .filter((v) => v && !/not clearly specified|unknown/i.test(v))
+    )
+  );
+  const placements = Array.from(
+    new Set(
+      scenes
+        .map((s) => String(s.composition?.subject_placement || "").trim())
+        .filter((v) => v && !/not clearly specified|unknown/i.test(v))
+    )
+  );
+
+  const summaryBits: string[] = [];
+  if (movements.length > 0) {
+    summaryBits.push(movements.join(", "));
+  }
+  if (framings.length > 0) {
+    summaryBits.push(framings.join(", "));
+  }
+  if (angles.length > 0) {
+    summaryBits.push(`${angles.join(", ")} angle`);
+  }
+  if (placements.length > 0) {
+    summaryBits.push(placements[0]);
+  }
+
+  const baseCameraLine = summaryBits.length > 0 ? summaryBits.join("; ") : "";
+  const formattedBase = baseCameraLine
+    ? ensureSentencePunctuation(
+        baseCameraLine.charAt(0).toUpperCase() + baseCameraLine.slice(1)
+      )
+    : "";
+
+  const durationObs = String(realData.video_overview?.duration_observation || "").trim();
+  if (formattedBase && durationObs && !isPhraseCoveredInText(durationObs, formattedBase)) {
+    return `${formattedBase} ${ensureSentencePunctuation(durationObs)}`;
+  }
+  if (formattedBase) {
+    return formattedBase;
+  }
+  if (durationObs) {
+    return ensureSentencePunctuation(durationObs);
+  }
+
+  return "Camera framing and movement details were not separately specified in the saved visual analysis.";
+}
+
 export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
   data,
   realData,
@@ -206,6 +738,8 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
 }) => {
   const [copiedSceneId, setCopiedSceneId] = useState<string | number | null>(null);
   const [copiedAll, setCopiedAll] = useState(false);
+  const [isSupportingFramesOpen, setIsSupportingFramesOpen] = useState(false);
+  const [isTechnicalDetailsOpen, setIsTechnicalDetailsOpen] = useState(false);
 
   const normalizedStatus = String(status || "").trim().toLowerCase();
   const rawStep1Status = String(step1Status || "").trim().toLowerCase();
@@ -1184,53 +1718,27 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
   }
 
   // =========================================================================
-  // 6. REAL BACKEND DATA RENDERING (VisualBackendResult)
+  // 6. REAL BACKEND DATA RENDERING (Concise Subject + Shots + Camera & Framing)
   // =========================================================================
   if (realData) {
     const overview = realData.video_overview;
-    const scenes = [...(realData.scenes || [])].sort(
+    const groqFallbackScenes: VisualBackendScene[] =
+      groqStep2Data &&
+      typeof groqStep2Data === "object" &&
+      Array.isArray((groqStep2Data as VisualBackendResult).scenes)
+        ? (groqStep2Data as VisualBackendResult).scenes
+        : [];
+    const scenes = [...(realData.scenes?.length ? realData.scenes : groqFallbackScenes)].sort(
       (a, b) => (a.start_time_seconds ?? 0) - (b.start_time_seconds ?? 0)
     );
     const metadata = realData.analysis_metadata || { warnings: [] };
 
-    // Unique framings & movements observed
-    const observedFramings = Array.from(
-      new Set(scenes.map((s) => s.camera?.shot_framing).filter(Boolean))
-    );
-    const observedAngles = Array.from(
-      new Set(scenes.map((s) => s.camera?.camera_angle).filter(Boolean))
-    );
-    const observedMovements = Array.from(
-      new Set(scenes.map((s) => s.camera?.camera_movement).filter(Boolean))
-    );
-
-    // Dominant colors aggregated across scenes
+    // Dominant colors aggregated across scenes (kept in collapsed Technical Details)
     const allColours = Array.from(
       new Set(
         scenes.flatMap((s) => s.composition?.dominant_colours || []).filter(Boolean)
       )
     );
-
-    const handleCopyAllScenes = () => {
-      const summaryText = scenes
-        .map(
-          (s) =>
-            `[Scene ${s.scene_number}] ${formatTimeRange(
-              s.start_time_seconds,
-              s.end_time_seconds
-            )}: ${s.scene_description}`
-        )
-        .join("\n");
-      navigator.clipboard.writeText(summaryText);
-      setCopiedAll(true);
-      setTimeout(() => setCopiedAll(false), 2000);
-    };
-
-    const handleCopyRow = (id: string | number, text: string) => {
-      navigator.clipboard.writeText(text);
-      setCopiedSceneId(id);
-      setTimeout(() => setCopiedSceneId(null), 1800);
-    };
 
     const providerIdentityText = [metadata.provider, metadata.source, metadata.model]
       .filter(Boolean)
@@ -1241,6 +1749,23 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
       providerIdentityText.includes("groq") ||
       providerIdentityText.includes("qwen") ||
       providerIdentityText.includes("fallback");
+
+    const hasGeminiTimeline =
+      effectiveStep1Status === "completed" || geminiOutfitChanges.length > 0;
+
+    // Synthesize chronological shot cards from Gemini outfit timeline + matched Groq frame observations
+    const synthesizedShots = buildSynthesizedShots(geminiOutfitChanges, scenes);
+    const subjectText = buildSubjectSummaryText(
+      geminiStep1Data,
+      groqStep2Data,
+      { ...realData, scenes },
+      synthesizedShots
+    );
+    const cameraFramingText = buildCameraFramingSummaryText(
+      geminiStep1Data,
+      groqStep2Data,
+      { ...realData, scenes }
+    );
 
     const backendFrameItems: FramePathItem[] = Array.isArray(metadata.submitted_frames)
       ? metadata.submitted_frames
@@ -1335,63 +1860,69 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
       resolvedEndCovered !== null ||
       resolvedFrameCount > 0;
 
+    const isSourceVerified =
+      hasGeminiTimeline &&
+      (effectiveStep1Status === "completed" || !isGroqFallbackResult);
+
+    const handleCopyAllBreakdownSummary = () => {
+      const lines: string[] = [
+        `Subject: ${subjectText}`,
+        "",
+        `Outfit Changes (${synthesizedShots.length} ${
+          synthesizedShots.length === 1 ? "Shot" : "Shots"
+        }):`,
+        ...synthesizedShots.map(
+          (shot) => `Shot ${shot.shotNumber} — ${shot.timestampLabel}\n${shot.description}`
+        ),
+        "",
+        `Camera & Framing: ${cameraFramingText}`,
+      ];
+      navigator.clipboard.writeText(lines.join("\n"));
+      setCopiedAll(true);
+      setTimeout(() => setCopiedAll(false), 2000);
+    };
+
+    const handleCopyRow = (id: string | number, text: string) => {
+      navigator.clipboard.writeText(text);
+      setCopiedSceneId(id);
+      setTimeout(() => setCopiedSceneId(null), 1800);
+    };
+
     return (
-      <div className="space-y-6">
-        {/* Real Backend Evidence Banner */}
+      <div className="space-y-5">
+        {/* Concise Status & Action Header (No noisy frame indexes or batch counts) */}
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2.5 rounded-xl bg-primary/10 border border-primary/25 px-4 py-3 text-xs shadow-sm">
           <div className="flex items-center gap-2.5 text-text-secondary">
             <span
               className={cn(
                 "inline-block h-2.5 w-2.5 rounded-full shrink-0",
-                isGroqFallbackResult ? "bg-warning" : "bg-success"
+                hasGeminiTimeline ? "bg-success" : "bg-warning"
               )}
             />
-            <span className="font-semibold text-text-primary">
-              {isGroqFallbackResult
-                ? "Fallback visual analysis completed (representative frames only)."
-                : "Visual analysis completed."}
-            </span>
-            <span className="hidden sm:inline text-text-muted">
-              {isGroqFallbackResult
-                ? "— Groq fallback analyzed submitted representative frames only"
-                : "— Gemini primary full-video observation"}
-              {metadata.model ? ` (${metadata.model})` : ""}
-            </span>
+            <div>
+              <span className="font-semibold text-text-primary">
+                {hasGeminiTimeline
+                  ? "Visual analysis completed."
+                  : "Sampled-frame visual analysis completed."}
+              </span>
+              <span className="hidden sm:inline text-text-muted ml-1.5">
+                {hasGeminiTimeline
+                  ? "— Gemini original-video outfit timeline with Groq sampled-frame enrichment"
+                  : "— Groq analyzed sampled representative frames only (not the complete video)"}
+              </span>
+            </div>
           </div>
+
           <div className="flex items-center gap-2 flex-wrap">
-            {resolvedFrameCount > 0 && (
+            {synthesizedShots.length > 0 && (
               <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-background-elevated text-text-secondary border border-card-border font-semibold">
-                {resolvedFrameCount} {resolvedFrameCount === 1 ? "Frame" : "Frames"} Selected
+                {synthesizedShots.length} {synthesizedShots.length === 1 ? "Shot" : "Shots"}
               </span>
             )}
-            {resolvedEndCovered === false && (
-              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-warning/15 text-warning border border-warning/30 font-semibold">
-                Final Frame Missing
-              </span>
-            )}
-            {resolvedLimitReached && (
-              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-warning/15 text-warning border border-warning/30 font-semibold">
-                30-Frame Ceiling Reached
-              </span>
-            )}
-            {isGroqFallbackResult ? (
-              <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded bg-warning/15 text-warning border border-warning/30 font-semibold">
-                Groq Fallback • Frames Only
-              </span>
-            ) : typeof metadata.frame_sampling_fps === "number" &&
-              metadata.frame_sampling_fps > 0 ? (
-              <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded bg-primary/15 text-primary border border-primary/25 font-semibold">
-                Sampled at {metadata.frame_sampling_fps} FPS
-              </span>
-            ) : metadata.model ? (
-              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-primary/15 text-primary border border-primary/25 font-semibold">
-                {metadata.model}
-              </span>
-            ) : null}
             <Button
               variant="secondary"
               size="sm"
-              onClick={handleCopyAllScenes}
+              onClick={handleCopyAllBreakdownSummary}
               leftIcon={
                 copiedAll ? (
                   <Check className="h-3.5 w-3.5 text-success" />
@@ -1405,474 +1936,535 @@ export const VisualAnalysis: React.FC<VisualAnalysisProps> = ({
           </div>
         </div>
 
-        {/* Two-Step Sequential Progress & Saved Gemini Outfit Timeline */}
-        {hasStepMetadata && renderTwoStepProgressCard(true)}
-        {renderGeminiOutfitTimelineCard()}
-
         {/* =================================================================== */}
-        {/* SECTION 1: Video Overview                                           */}
+        {/* 1. SUBJECT (Single concise section, preserves source verified status) */}
         {/* =================================================================== */}
-        <div className="rounded-xl border border-card-border bg-card p-5 space-y-4 shadow-card">
-          <div className="flex items-center gap-2.5 border-b border-card-border/60 pb-3">
-            <span className="p-2 rounded-lg bg-primary/15 text-primary border border-primary/25">
-              <Eye className="h-4 w-4" />
-            </span>
-            <div>
-              <h3 className="text-sm font-bold text-text-primary">
-                1. Video Overview
-              </h3>
-              <p className="text-[11px] text-text-muted">
-                Synthesized visual summary and observable duration pacing
-              </p>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div className="rounded-lg bg-background-elevated/70 p-4 border border-card-border space-y-1.5">
-              <span className="text-[10px] font-semibold text-text-muted uppercase tracking-wider block">
-                Visible Summary:
-              </span>
-              <p className="text-xs leading-relaxed text-text-primary">
-                {overview?.summary || "Direct visual summary generated from sampled video frames."}
-              </p>
-            </div>
-
-            <div className="rounded-lg bg-background-elevated/70 p-4 border border-card-border space-y-1.5">
-              <span className="text-[10px] font-semibold text-text-muted uppercase tracking-wider block">
-                Duration & Pacing Observation:
-              </span>
-              <p className="text-xs leading-relaxed text-text-secondary">
-                {overview?.duration_observation || "Duration observation based on visual cut tempo."}
-              </p>
-            </div>
-          </div>
-        </div>
-
-        {/* =================================================================== */}
-        {/* SECTION 2: Scene-by-Scene Analysis                                  */}
-        {/* =================================================================== */}
-        <div className="rounded-xl border border-card-border bg-card p-5 space-y-4 shadow-card">
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 border-b border-card-border/80 pb-3">
+        <div className="rounded-xl border border-card-border bg-card p-5 space-y-3 shadow-card">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-card-border/60 pb-3">
             <div className="flex items-center gap-2.5">
               <span className="p-2 rounded-lg bg-primary/15 text-primary border border-primary/25">
-                <Film className="h-4 w-4" />
+                <User className="h-4 w-4" />
               </span>
               <div>
-                <h3 className="text-sm font-bold text-text-primary">
-                  2. Scene-by-Scene Analysis ({scenes.length} {scenes.length === 1 ? "Scene" : "Scenes"})
-                </h3>
+                <h3 className="text-sm font-bold text-text-primary">1. Subject</h3>
                 <p className="text-[11px] text-text-muted">
-                  Detailed chronological observation of each shot boundary
+                  Consistent subject appearance and hairstyle progression across the Reel
                 </p>
               </div>
             </div>
+
+            {isSourceVerified ? (
+              <span className="inline-flex items-center gap-1 rounded bg-success/15 px-2.5 py-0.5 text-[10px] font-mono font-semibold text-success border border-success/25">
+                <Check className="h-3 w-3" />
+                Verified • Original Reel
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1 rounded bg-warning/15 px-2.5 py-0.5 text-[10px] font-mono font-semibold text-warning border border-warning/25">
+                <Info className="h-3 w-3" />
+                Sampled Frames Only
+              </span>
+            )}
           </div>
 
-          {scenes.length > 0 ? (
-            <div className="space-y-4">
-              {scenes.map((scene) => (
+          <p className="text-xs sm:text-[13px] leading-relaxed text-text-primary">
+            {subjectText}
+          </p>
+        </div>
+
+        {/* =================================================================== */}
+        {/* 2. OUTFIT CHANGES — N SHOTS                                         */}
+        {/* =================================================================== */}
+        <div className="rounded-xl border border-card-border bg-card p-5 space-y-4 shadow-card">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 border-b border-card-border/70 pb-3">
+            <div className="flex items-center gap-2.5">
+              <span className="p-2 rounded-lg bg-primary/15 text-primary border border-primary/25">
+                <Layers className="h-4 w-4" />
+              </span>
+              <div>
+                <h3 className="text-sm font-bold text-text-primary">
+                  2. Outfit Changes — {synthesizedShots.length}{" "}
+                  {synthesizedShots.length === 1 ? "Shot" : "Shots"}
+                </h3>
+                <p className="text-[11px] text-text-muted">
+                  {hasGeminiTimeline
+                    ? "Chronological shots from Gemini's original-video outfit timeline, enriched with Groq sampled-frame actions"
+                    : "Chronological outfit segments grouped from Groq sampled-frame observations"}
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-1.5 flex-wrap text-[10px] font-mono">
+              {hasGeminiTimeline && (
+                <span className="rounded bg-primary/10 text-primary border border-primary/25 px-2 py-0.5 font-semibold">
+                  Gemini Timeline
+                </span>
+              )}
+              {scenes.length > 0 && (
+                <span className="rounded bg-background-elevated text-text-secondary border border-card-border px-2 py-0.5">
+                  Groq Frame Enrichment
+                </span>
+              )}
+            </div>
+          </div>
+
+          {synthesizedShots.length > 0 ? (
+            <div className="space-y-3">
+              {synthesizedShots.map((shot) => (
                 <div
-                  key={scene.scene_number}
-                  className="rounded-xl border border-card-border bg-background-elevated/40 p-4 space-y-3 hover:border-primary/40 transition-colors"
+                  key={`shot-${shot.shotNumber}-${shot.timestampLabel}`}
+                  className="rounded-xl border border-card-border bg-background-elevated/45 p-4 space-y-2.5 hover:border-primary/40 transition-colors"
                 >
-                  {/* Scene Header */}
-                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-card-border/60 pb-2.5">
-                    <div className="flex items-center gap-2">
-                      <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-mono font-bold bg-primary/20 text-primary border border-primary/30">
-                        Scene {scene.scene_number}
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="inline-flex items-center px-2.5 py-0.5 rounded text-[11px] font-mono font-bold bg-primary/20 text-primary border border-primary/30">
+                        Shot {shot.shotNumber}
                       </span>
                       <button
                         type="button"
-                        onClick={() => onSeek(scene.start_time_seconds)}
+                        onClick={() => onSeek(shot.startSec)}
                         className="inline-flex items-center gap-1.5 rounded bg-primary/10 hover:bg-primary/20 text-primary border border-primary/25 px-2.5 py-0.5 font-mono text-xs font-semibold transition-colors cursor-pointer"
-                        title="Seek video to start of scene"
+                        title="Seek video to shot timestamp"
                       >
                         <Play className="h-3 w-3 fill-current" />
-                        <span>{formatTimeRange(scene.start_time_seconds, scene.end_time_seconds)}</span>
+                        <span>{shot.timestampLabel}</span>
                       </button>
                     </div>
 
-                    <button
-                      type="button"
-                      onClick={() => handleCopyRow(scene.scene_number, scene.scene_description)}
-                      className="p-1 rounded text-text-muted hover:text-text-primary hover:bg-background-elevated transition-colors"
-                      title="Copy scene description"
-                    >
-                      {copiedSceneId === scene.scene_number ? (
-                        <Check className="h-3.5 w-3.5 text-success" />
-                      ) : (
-                        <Copy className="h-3.5 w-3.5" />
-                      )}
-                    </button>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] font-mono text-text-muted">
+                        {shot.sourceKind === "gemini_plus_groq"
+                          ? "Gemini timeline + Groq frames"
+                          : shot.sourceKind === "gemini_only"
+                          ? "Gemini timeline"
+                          : "Groq sampled frames"}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          handleCopyRow(
+                            `shot-${shot.shotNumber}`,
+                            `Shot ${shot.shotNumber} — ${shot.timestampLabel}\n${shot.description}`
+                          )
+                        }
+                        className="p-1 rounded text-text-muted hover:text-text-primary hover:bg-background-elevated transition-colors"
+                        title="Copy shot description"
+                      >
+                        {copiedSceneId === `shot-${shot.shotNumber}` ? (
+                          <Check className="h-3.5 w-3.5 text-success" />
+                        ) : (
+                          <Copy className="h-3.5 w-3.5" />
+                        )}
+                      </button>
+                    </div>
                   </div>
 
-                  {/* Scene Description */}
-                  <p className="text-xs leading-relaxed text-text-primary font-medium">
-                    {scene.scene_description || "Not clearly visible"}
+                  <p className="text-xs sm:text-[13px] leading-relaxed text-text-primary">
+                    {shot.description}
                   </p>
 
-                  {/* Detailed Specs Grid */}
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 text-[11px] pt-1">
-                    {/* Visible Subjects */}
-                    <div className="rounded-lg bg-card/80 p-2.5 border border-card-border/80 space-y-1">
-                      <div className="flex items-center gap-1.5 text-text-muted font-semibold uppercase tracking-wider text-[10px]">
-                        <User className="h-3 w-3 text-primary" />
-                        <span>Visible Subjects:</span>
+                  {shot.groqEnrichment &&
+                    !isPhraseCoveredInText(shot.groqEnrichment, shot.description) && (
+                      <div className="rounded-lg bg-card/75 border border-card-border/80 px-3 py-2 text-[11px] text-text-secondary">
+                        <span className="font-semibold text-text-primary">
+                          Groq sampled-frame observation:{" "}
+                        </span>
+                        <span>{shot.groqEnrichment}</span>
                       </div>
-                      {scene.visible_subjects && scene.visible_subjects.length > 0 ? (
-                        scene.visible_subjects.map((subj, sIdx) => (
-                          <div key={sIdx} className="space-y-0.5 text-text-secondary">
-                            <span className="font-semibold text-text-primary">{subj.subject_label}: </span>
-                            <span>{subj.visible_action || "Observed in frame"}</span>
-                            {subj.clothing && (
-                              <p className="text-[10px] text-text-muted">
-                                Clothing: {subj.clothing}
-                              </p>
-                            )}
-                          </div>
-                        ))
-                      ) : (
-                        <p className="text-text-muted italic">No distinct subjects identified</p>
-                      )}
-                    </div>
+                    )}
 
-                    {/* Environment & Objects */}
-                    <div className="rounded-lg bg-card/80 p-2.5 border border-card-border/80 space-y-1">
-                      <div className="flex items-center gap-1.5 text-text-muted font-semibold uppercase tracking-wider text-[10px]">
-                        <Home className="h-3 w-3 text-primary" />
-                        <span>Setting & Objects:</span>
-                      </div>
-                      <p className="text-text-secondary">
-                        <span className="text-text-muted">Setting: </span>
-                        {scene.environment?.setting || "Not clearly visible"}
-                      </p>
-                      {scene.environment?.visible_objects && scene.environment.visible_objects.length > 0 && (
-                        <p className="text-[10px] text-text-muted line-clamp-2">
-                          Objects: {scene.environment.visible_objects.join(", ")}
-                        </p>
-                      )}
-                    </div>
+                  {shot.geminiNotes && (
+                    <p className="text-[11px] text-text-muted leading-relaxed">
+                      <span className="font-semibold text-text-secondary">Timeline evidence: </span>
+                      {shot.geminiNotes}
+                    </p>
+                  )}
 
-                    {/* Camera & Framing */}
-                    <div className="rounded-lg bg-card/80 p-2.5 border border-card-border/80 space-y-1">
-                      <div className="flex items-center gap-1.5 text-text-muted font-semibold uppercase tracking-wider text-[10px]">
-                        <Camera className="h-3 w-3 text-primary" />
-                        <span>Camera & Angle:</span>
-                      </div>
-                      <p className="text-text-secondary">
-                        {scene.camera?.shot_framing || "Framing not specified"} • {scene.camera?.camera_angle || "Angle not specified"}
-                      </p>
-                      <p className="text-[10px] text-text-muted">
-                        Movement: {scene.camera?.camera_movement || "Static"}
-                      </p>
+                  {shot.warnings.length > 0 && (
+                    <div className="rounded-lg bg-warning/10 border border-warning/25 px-3 py-1.5 text-[11px] text-warning space-y-0.5">
+                      {shot.warnings.map((warn, wIdx) => (
+                        <p key={wIdx}>Note: {warn}</p>
+                      ))}
                     </div>
-                  </div>
+                  )}
                 </div>
               ))}
             </div>
           ) : (
             <p className="text-xs text-text-muted italic">
-              No distinct scene cuts identified in the sampled frames.
+              No distinct outfit shots were identified in the saved visual analysis.
             </p>
           )}
         </div>
 
         {/* =================================================================== */}
-        {/* SECTION 3: Camera and Framing Breakdown                             */}
+        {/* 3. CAMERA & FRAMING (Single separate section)                       */}
         {/* =================================================================== */}
-        <div className="rounded-xl border border-card-border bg-card p-5 space-y-4 shadow-card">
-          <div className="flex items-center gap-2.5 border-b border-card-border/60 pb-3">
-            <span className="p-2 rounded-lg bg-primary/15 text-primary border border-primary/25">
-              <Video className="h-4 w-4" />
-            </span>
-            <div>
-              <h3 className="text-sm font-bold text-text-primary">
-                3. Camera and Framing Breakdown
-              </h3>
-              <p className="text-[11px] text-text-muted">
-                Observed shot scales, camera angles, and observable camera movements
-              </p>
+        <div className="rounded-xl border border-card-border bg-card p-5 space-y-3 shadow-card">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-card-border/60 pb-3">
+            <div className="flex items-center gap-2.5">
+              <span className="p-2 rounded-lg bg-primary/15 text-primary border border-primary/25">
+                <Video className="h-4 w-4" />
+              </span>
+              <div>
+                <h3 className="text-sm font-bold text-text-primary">
+                  3. Camera & Framing
+                </h3>
+                <p className="text-[11px] text-text-muted">
+                  Overall shot scale, camera stability, subject framing, and cut behavior
+                </p>
+              </div>
             </div>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
-            <div className="rounded-lg bg-background-elevated/70 p-3.5 border border-card-border space-y-1.5">
-              <span className="text-[10px] font-semibold text-text-muted uppercase tracking-wider block">
-                Observed Shot Framing:
-              </span>
-              <p className="text-text-primary font-semibold">
-                {observedFramings.length > 0 ? observedFramings.join(", ") : "Not clearly specified"}
-              </p>
-              <p className="text-[11px] text-text-muted pt-1">
-                Framing scale directly identified from visual boundaries in sampled frames.
-              </p>
-            </div>
-
-            <div className="rounded-lg bg-background-elevated/70 p-3.5 border border-card-border space-y-1.5">
-              <span className="text-[10px] font-semibold text-text-muted uppercase tracking-wider block">
-                Observed Camera Angles:
-              </span>
-              <p className="text-text-primary font-semibold">
-                {observedAngles.length > 0 ? observedAngles.join(", ") : "Not clearly specified"}
-              </p>
-              <p className="text-[11px] text-text-muted pt-1">
-                Camera perspective angle relative to the primary subject.
-              </p>
-            </div>
-
-            <div className="rounded-lg bg-background-elevated/70 p-3.5 border border-card-border space-y-1.5">
-              <span className="text-[10px] font-semibold text-text-muted uppercase tracking-wider block">
-                Observable Camera Movement:
-              </span>
-              <p className="text-text-primary font-semibold">
-                {observedMovements.length > 0
-                  ? observedMovements.join(", ")
-                  : "Not clearly specified"}
-              </p>
-              <p className="text-[11px] text-text-muted pt-1">
-                Camera dynamics observed between consecutive sampled frames.
-              </p>
-            </div>
-          </div>
+          <p className="text-xs sm:text-[13px] leading-relaxed text-text-primary">
+            {cameraFramingText}
+          </p>
         </div>
 
         {/* =================================================================== */}
-        {/* SECTION 4: Visual Composition & Palette                             */}
+        {/* SUPPORTING EVIDENCE: REPRESENTATIVE FRAME OBSERVATIONS (Collapsed)  */}
         {/* =================================================================== */}
-        <div className="rounded-xl border border-card-border bg-card p-5 space-y-4 shadow-card">
-          <div className="flex items-center gap-2.5 border-b border-card-border/60 pb-3">
-            <span className="p-2 rounded-lg bg-primary/15 text-primary border border-primary/25">
-              <Palette className="h-4 w-4" />
-            </span>
-            <div>
-              <h3 className="text-sm font-bold text-text-primary">
-                4. Visual Composition & Palette
-              </h3>
-              <p className="text-[11px] text-text-muted">
-                Dominant color tones, subject placement, and lighting appearance
-              </p>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
-            {/* Dominant Colours */}
-            <div className="rounded-lg bg-background-elevated/70 p-3.5 border border-card-border space-y-2">
-              <span className="text-[10px] font-semibold text-text-muted uppercase tracking-wider block">
-                Dominant Color Tones:
-              </span>
-              {allColours.length > 0 ? (
-                <div className="flex flex-wrap gap-2">
-                  {allColours.map((col, idx) => (
-                    <span
-                      key={idx}
-                      className="inline-flex items-center gap-1.5 rounded-md bg-card px-2.5 py-1 text-xs font-medium text-text-primary border border-card-border shadow-xs"
-                    >
-                      <span className="h-2 w-2 rounded-full bg-primary" />
-                      <span>{col}</span>
-                    </span>
-                  ))}
+        {scenes.length > 0 && (
+          <div className="rounded-xl border border-card-border bg-card shadow-card overflow-hidden">
+            <button
+              type="button"
+              onClick={() => setIsSupportingFramesOpen((prev) => !prev)}
+              className="w-full flex items-center justify-between gap-3 px-5 py-3.5 text-left hover:bg-background-elevated/50 transition-colors cursor-pointer"
+              aria-expanded={isSupportingFramesOpen}
+            >
+              <div className="flex items-center gap-2.5">
+                <span className="p-1.5 rounded-lg bg-background-elevated text-text-secondary border border-card-border">
+                  <Film className="h-3.5 w-3.5" />
+                </span>
+                <div>
+                  <h4 className="text-xs sm:text-sm font-semibold text-text-primary">
+                    Supporting Frame Evidence ({scenes.length} Sampled-Frame Observations)
+                  </h4>
+                  <p className="text-[11px] text-text-muted">
+                    Individual Groq observations from sampled frames only — supporting evidence, not separate shots or outfit changes
+                  </p>
                 </div>
-              ) : (
-                <p className="text-text-muted italic text-[11px]">No dominant colors extracted</p>
-              )}
-            </div>
-
-            {/* Lighting & Contrast */}
-            <div className="rounded-lg bg-background-elevated/70 p-3.5 border border-card-border space-y-1.5">
-              <span className="text-[10px] font-semibold text-text-muted uppercase tracking-wider block">
-                Visible Contrast & Lighting Appearance:
+              </div>
+              <span className="inline-flex items-center gap-1 text-[11px] font-mono text-text-muted shrink-0">
+                <span>{isSupportingFramesOpen ? "Hide" : "Show"}</span>
+                {isSupportingFramesOpen ? (
+                  <ChevronUp className="h-4 w-4" />
+                ) : (
+                  <ChevronDown className="h-4 w-4" />
+                )}
               </span>
-              <p className="text-text-primary leading-relaxed">
-                {scenes.find((s) => s.composition?.contrast_and_lighting_appearance)?.composition
-                  ?.contrast_and_lighting_appearance ||
-                  "Contrast and lighting appearance not separately specified in sampled frames."}
-              </p>
-            </div>
-          </div>
-        </div>
+            </button>
 
-        {/* =================================================================== */}
-        {/* SECTION 5: Analysis Warnings & Methodology Notice                   */}
-        {/* =================================================================== */}
-        <div className="rounded-xl border border-card-border bg-card p-5 space-y-4 shadow-card">
-          <div className="flex items-center gap-2 text-xs font-semibold text-text-primary">
-            <Info className="h-4 w-4 text-primary" />
-            <span>Methodology, Provider Scope & Sampling Limitations</span>
-          </div>
+            {isSupportingFramesOpen && (
+              <div className="border-t border-card-border/70 p-4 sm:p-5 space-y-3 bg-background-elevated/25">
+                {scenes.map((scene, idx) => (
+                  <div
+                    key={`frame-obs-${scene.scene_number}-${idx}`}
+                    className="rounded-lg border border-card-border bg-card p-3.5 space-y-2 text-xs"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <span className="rounded bg-background-elevated px-2 py-0.5 text-[10px] font-mono font-semibold text-text-secondary border border-card-border">
+                          Sampled-Frame Observation
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => onSeek(scene.start_time_seconds)}
+                          className="inline-flex items-center gap-1 rounded bg-primary/10 hover:bg-primary/20 text-primary border border-primary/25 px-2 py-0.5 font-mono text-[11px] font-semibold transition-colors cursor-pointer"
+                          title="Seek video to sampled timestamp"
+                        >
+                          <Play className="h-2.5 w-2.5 fill-current" />
+                          <span>
+                            {formatPreciseTimeRange(
+                              scene.start_time_seconds,
+                              scene.end_time_seconds
+                            )}
+                          </span>
+                        </button>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          handleCopyRow(`obs-${idx}`, scene.scene_description || "")
+                        }
+                        className="p-1 rounded text-text-muted hover:text-text-primary hover:bg-background-elevated transition-colors"
+                        title="Copy observation"
+                      >
+                        {copiedSceneId === `obs-${idx}` ? (
+                          <Check className="h-3.5 w-3.5 text-success" />
+                        ) : (
+                          <Copy className="h-3.5 w-3.5" />
+                        )}
+                      </button>
+                    </div>
 
-          {/* Submitted Frames & Timestamps */}
-          {(resolvedFrameCount > 0 || resolvedSubmittedFrames.length > 0 || showCoverageTelemetry) && (
-            <div className="rounded-lg bg-background-elevated/70 p-3.5 border border-card-border space-y-2.5">
-              <div className="flex items-center justify-between gap-2 flex-wrap">
-                <span className="text-[10px] font-semibold text-text-muted uppercase tracking-wider">
-                  Adaptively Selected Frames ({resolvedFrameCount} selected · max 30 safety ceiling)
-                </span>
-                <span className="text-[11px] font-mono text-text-muted">
-                  Click any timestamp to seek video
-                </span>
-              </div>
+                    <p className="text-text-primary leading-relaxed">
+                      {scene.scene_description || "Not clearly visible"}
+                    </p>
 
-              {showCoverageTelemetry && (
-                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 pt-0.5 text-[11px]">
-                  <div className="rounded bg-card px-2.5 py-1.5 border border-card-border">
-                    <span className="text-[10px] text-text-muted block">Actual Duration</span>
-                    <span className="font-mono font-semibold text-text-primary">
-                      {resolvedActualDuration !== null ? `${resolvedActualDuration.toFixed(2)}s` : "—"}
-                    </span>
+                    {scene.visible_subjects && scene.visible_subjects.length > 0 && (
+                      <div className="text-[11px] text-text-secondary space-y-0.5">
+                        {scene.visible_subjects.map((subj, sIdx) => (
+                          <p key={sIdx}>
+                            <span className="font-semibold text-text-primary">
+                              {subj.subject_label}:{" "}
+                            </span>
+                            {subj.visible_action || "Observed in frame"}
+                            {subj.clothing ? ` — ${subj.clothing}` : ""}
+                          </p>
+                        ))}
+                      </div>
+                    )}
                   </div>
-                  <div className="rounded bg-card px-2.5 py-1.5 border border-card-border">
-                    <span className="text-[10px] text-text-muted block">First Timestamp</span>
-                    <span className="font-mono font-semibold text-text-primary">
-                      {resolvedFirstTimestamp !== null ? `${resolvedFirstTimestamp.toFixed(2)}s` : "—"}
-                    </span>
-                  </div>
-                  <div className="rounded bg-card px-2.5 py-1.5 border border-card-border">
-                    <span className="text-[10px] text-text-muted block">Last Timestamp</span>
-                    <span className="font-mono font-semibold text-text-primary">
-                      {resolvedLastTimestamp !== null ? `${resolvedLastTimestamp.toFixed(2)}s` : "—"}
-                    </span>
-                  </div>
-                  <div className="rounded bg-card px-2.5 py-1.5 border border-card-border">
-                    <span className="text-[10px] text-text-muted block">Opening Frame</span>
-                    <span
-                      className={cn(
-                        "font-mono font-semibold",
-                        resolvedOpeningCovered === true
-                          ? "text-success"
-                          : resolvedOpeningCovered === false
-                          ? "text-warning"
-                          : "text-text-secondary"
-                      )}
-                    >
-                      {resolvedOpeningCovered === true
-                        ? "Covered"
-                        : resolvedOpeningCovered === false
-                        ? "Failed / Missing"
-                        : "Recorded on extraction"}
-                    </span>
-                  </div>
-                  <div className="rounded bg-card px-2.5 py-1.5 border border-card-border">
-                    <span className="text-[10px] text-text-muted block">Final Frame</span>
-                    <span
-                      className={cn(
-                        "font-mono font-semibold",
-                        resolvedEndCovered === true
-                          ? "text-success"
-                          : resolvedEndCovered === false
-                          ? "text-warning"
-                          : "text-text-secondary"
-                      )}
-                    >
-                      {resolvedEndCovered === true
-                        ? "Covered"
-                        : resolvedEndCovered === false
-                        ? "Failed / Missing"
-                        : "Recorded on extraction"}
-                    </span>
-                  </div>
-                  <div className="rounded bg-card px-2.5 py-1.5 border border-card-border">
-                    <span className="text-[10px] text-text-muted block">30-Frame Limit</span>
-                    <span
-                      className={cn(
-                        "font-mono font-semibold",
-                        resolvedLimitReached ? "text-warning" : "text-text-primary"
-                      )}
-                    >
-                      {resolvedLimitReached ? "Reached" : "Within limit"}
-                    </span>
-                  </div>
-                </div>
-              )}
-
-              {resolvedSubmittedFrames.length > 0 ? (
-                <div className="flex flex-wrap gap-1.5">
-                  {resolvedSubmittedFrames.map((frame, idx) => (
-                    <button
-                      key={`${frame.path}-${idx}`}
-                      type="button"
-                      onClick={() => onSeek(frame.timestamp_seconds)}
-                      className="inline-flex items-center gap-1 rounded bg-primary/10 hover:bg-primary/20 text-primary border border-primary/25 px-2 py-0.5 font-mono text-[11px] font-semibold transition-colors cursor-pointer"
-                      title={`Seek to Frame #${idx + 1} (${frame.timestamp_seconds}s)`}
-                    >
-                      <Play className="h-2.5 w-2.5 fill-current" />
-                      <span>
-                        Frame {idx + 1} · {formatSecondsToTimestamp(frame.timestamp_seconds)} ({frame.timestamp_seconds.toFixed(2)}s)
-                      </span>
-                    </button>
-                  ))}
-                </div>
-              ) : resolvedFrameCount > 0 ? (
-                <p className="text-xs text-text-secondary">
-                  {resolvedFrameCount} adaptive representative{" "}
-                  {resolvedFrameCount === 1 ? "frame was" : "frames were"} selected and submitted for visual fallback coverage.
-                </p>
-              ) : null}
-            </div>
-          )}
-
-          {resolvedEndpointWarning && (
-            <div className="rounded-lg bg-warning/10 border border-warning/30 p-3.5 text-xs text-text-primary flex items-start gap-2.5">
-              <AlertTriangle className="h-4 w-4 text-warning shrink-0 mt-0.5" />
-              <div className="space-y-0.5">
-                <span className="font-semibold text-warning block">
-                  {resolvedEndCovered === false
-                    ? "Final Frame Coverage Incomplete"
-                    : "Endpoint Frame Coverage Warning"}
-                </span>
-                <p className="text-text-secondary leading-relaxed">
-                  {resolvedEndpointWarning}
-                </p>
-              </div>
-            </div>
-          )}
-
-          {resolvedSamplingWarning && (
-            <div className="rounded-lg bg-warning/10 border border-warning/30 p-3.5 text-xs text-text-primary flex items-start gap-2.5">
-              <AlertTriangle className="h-4 w-4 text-warning shrink-0 mt-0.5" />
-              <div className="space-y-0.5">
-                <span className="font-semibold text-warning block">
-                  Sampling Ceiling Reached (30 Frames)
-                </span>
-                <p className="text-text-secondary leading-relaxed">
-                  {resolvedSamplingWarning}
-                </p>
-              </div>
-            </div>
-          )}
-
-          <div className="rounded-lg bg-background-elevated/60 p-3.5 text-xs leading-relaxed text-text-secondary border border-card-border space-y-2">
-            <p>
-              <strong className="text-text-primary">Provider Scope: </strong>
-              Gemini remains the primary full-video analysis provider. Groq serves as a fallback provider that analyzes only the adaptively selected representative frames (up to the 30-frame safety ceiling) and is never a complete full-video analysis.
-            </p>
-            <p>
-              <strong className="text-text-primary">Adaptive Sampling Limitation: </strong>
-              {isGroqFallbackResult
-                ? "This result was produced by Groq fallback from the submitted representative frames only. "
-                : typeof metadata.frame_sampling_fps === "number" &&
-                  metadata.frame_sampling_fps > 0
-                ? `Primary visual analysis sampled the video at ${metadata.frame_sampling_fps} FPS. `
-                : ""}
-              Adaptive sampling targets visual changes (scene cuts, outfit/background shifts, framing changes, and text overlays) rather than capturing every video frame; rapid flashes or brief events between sampled timestamps may not be captured.
-            </p>
-            <p className="text-[11px] text-text-muted">
-              Evidence & accuracy policy: Scene timestamps remain chronological and events between unsampled frames are not fabricated. Technical camera hardware, lens specs, lighting gear, and unidentifiable people are never invented.
-            </p>
-          </div>
-
-          {metadata.warnings && metadata.warnings.length > 0 && (
-            <div className="space-y-1.5 pt-1">
-              <span className="text-[10px] font-semibold text-warning uppercase tracking-wider block">
-                Backend Observations:
-              </span>
-              <ul className="space-y-1 text-xs text-text-secondary">
-                {metadata.warnings.map((w, idx) => (
-                  <li key={idx} className="flex items-start gap-2">
-                    <AlertTriangle className="h-3.5 w-3.5 text-warning shrink-0 mt-0.5" />
-                    <span>{w}</span>
-                  </li>
                 ))}
-              </ul>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* =================================================================== */}
+        {/* TECHNICAL DETAILS & PIPELINE METADATA (Collapsed by default)        */}
+        {/* =================================================================== */}
+        <div className="rounded-xl border border-card-border bg-card shadow-card overflow-hidden">
+          <button
+            type="button"
+            onClick={() => setIsTechnicalDetailsOpen((prev) => !prev)}
+            className="w-full flex items-center justify-between gap-3 px-5 py-3.5 text-left hover:bg-background-elevated/50 transition-colors cursor-pointer"
+            aria-expanded={isTechnicalDetailsOpen}
+          >
+            <div className="flex items-center gap-2.5">
+              <span className="p-1.5 rounded-lg bg-background-elevated text-text-secondary border border-card-border">
+                <Info className="h-3.5 w-3.5" />
+              </span>
+              <div>
+                <h4 className="text-xs sm:text-sm font-semibold text-text-primary">
+                  Technical Details, Pipeline Status & Provider Scope
+                </h4>
+                <p className="text-[11px] text-text-muted">
+                  Sequential Gemini/Groq step statuses, color palette, sampling timestamps, and limitations
+                </p>
+              </div>
+            </div>
+            <span className="inline-flex items-center gap-1 text-[11px] font-mono text-text-muted shrink-0">
+              <span>{isTechnicalDetailsOpen ? "Hide" : "Show"}</span>
+              {isTechnicalDetailsOpen ? (
+                <ChevronUp className="h-4 w-4" />
+              ) : (
+                <ChevronDown className="h-4 w-4" />
+              )}
+            </span>
+          </button>
+
+          {isTechnicalDetailsOpen && (
+            <div className="border-t border-card-border/70 p-4 sm:p-5 space-y-5 bg-background-elevated/20">
+              {hasStepMetadata && renderTwoStepProgressCard(true)}
+
+              {/* Video Overview & Visual Composition */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+                <div className="rounded-lg bg-card p-3.5 border border-card-border space-y-1.5">
+                  <span className="text-[10px] font-semibold text-text-muted uppercase tracking-wider block">
+                    Synthesized Overview
+                  </span>
+                  <p className="text-text-secondary leading-relaxed">
+                    {overview?.summary ||
+                      geminiStep1Data?.summary ||
+                      "Synthesized from saved visual analysis records."}
+                  </p>
+                </div>
+
+                <div className="rounded-lg bg-card p-3.5 border border-card-border space-y-2">
+                  <div className="flex items-center gap-1.5 text-[10px] font-semibold text-text-muted uppercase tracking-wider">
+                    <Palette className="h-3 w-3 text-primary" />
+                    <span>Dominant Color Tones</span>
+                  </div>
+                  {allColours.length > 0 ? (
+                    <div className="flex flex-wrap gap-1.5">
+                      {allColours.map((col, idx) => (
+                        <span
+                          key={idx}
+                          className="inline-flex items-center gap-1.5 rounded-md bg-background-elevated px-2 py-0.5 text-[11px] font-medium text-text-primary border border-card-border"
+                        >
+                          <span className="h-1.5 w-1.5 rounded-full bg-primary" />
+                          <span>{col}</span>
+                        </span>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-text-muted italic text-[11px]">
+                      No dominant colors recorded
+                    </p>
+                  )}
+                </div>
+              </div>
+
+              {/* Submitted Frames & Sampling Coverage */}
+              {(resolvedFrameCount > 0 ||
+                resolvedSubmittedFrames.length > 0 ||
+                showCoverageTelemetry) && (
+                <div className="rounded-lg bg-card p-3.5 border border-card-border space-y-2.5">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <span className="text-[10px] font-semibold text-text-muted uppercase tracking-wider">
+                      Sampling Coverage ({resolvedFrameCount} frames · max 30 ceiling)
+                    </span>
+                    <span className="text-[11px] font-mono text-text-muted">
+                      Click any timestamp to seek video
+                    </span>
+                  </div>
+
+                  {showCoverageTelemetry && (
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 pt-0.5 text-[11px]">
+                      <div className="rounded bg-background-elevated px-2.5 py-1.5 border border-card-border">
+                        <span className="text-[10px] text-text-muted block">Actual Duration</span>
+                        <span className="font-mono font-semibold text-text-primary">
+                          {resolvedActualDuration !== null
+                            ? `${resolvedActualDuration.toFixed(2)}s`
+                            : "—"}
+                        </span>
+                      </div>
+                      <div className="rounded bg-background-elevated px-2.5 py-1.5 border border-card-border">
+                        <span className="text-[10px] text-text-muted block">First Timestamp</span>
+                        <span className="font-mono font-semibold text-text-primary">
+                          {resolvedFirstTimestamp !== null
+                            ? `${resolvedFirstTimestamp.toFixed(2)}s`
+                            : "—"}
+                        </span>
+                      </div>
+                      <div className="rounded bg-background-elevated px-2.5 py-1.5 border border-card-border">
+                        <span className="text-[10px] text-text-muted block">Last Timestamp</span>
+                        <span className="font-mono font-semibold text-text-primary">
+                          {resolvedLastTimestamp !== null
+                            ? `${resolvedLastTimestamp.toFixed(2)}s`
+                            : "—"}
+                        </span>
+                      </div>
+                      <div className="rounded bg-background-elevated px-2.5 py-1.5 border border-card-border">
+                        <span className="text-[10px] text-text-muted block">Opening Frame</span>
+                        <span
+                          className={cn(
+                            "font-mono font-semibold",
+                            resolvedOpeningCovered === true
+                              ? "text-success"
+                              : resolvedOpeningCovered === false
+                              ? "text-warning"
+                              : "text-text-secondary"
+                          )}
+                        >
+                          {resolvedOpeningCovered === true
+                            ? "Covered"
+                            : resolvedOpeningCovered === false
+                            ? "Failed / Missing"
+                            : "Recorded on extraction"}
+                        </span>
+                      </div>
+                      <div className="rounded bg-background-elevated px-2.5 py-1.5 border border-card-border">
+                        <span className="text-[10px] text-text-muted block">Final Frame</span>
+                        <span
+                          className={cn(
+                            "font-mono font-semibold",
+                            resolvedEndCovered === true
+                              ? "text-success"
+                              : resolvedEndCovered === false
+                              ? "text-warning"
+                              : "text-text-secondary"
+                          )}
+                        >
+                          {resolvedEndCovered === true
+                            ? "Covered"
+                            : resolvedEndCovered === false
+                            ? "Failed / Missing"
+                            : "Recorded on extraction"}
+                        </span>
+                      </div>
+                      <div className="rounded bg-background-elevated px-2.5 py-1.5 border border-card-border">
+                        <span className="text-[10px] text-text-muted block">30-Frame Limit</span>
+                        <span
+                          className={cn(
+                            "font-mono font-semibold",
+                            resolvedLimitReached ? "text-warning" : "text-text-primary"
+                          )}
+                        >
+                          {resolvedLimitReached ? "Reached" : "Within limit"}
+                        </span>
+                      </div>
+                    </div>
+                  )}
+
+                  {resolvedSubmittedFrames.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5">
+                      {resolvedSubmittedFrames.map((frame, idx) => (
+                        <button
+                          key={`${frame.path}-${idx}`}
+                          type="button"
+                          onClick={() => onSeek(frame.timestamp_seconds)}
+                          className="inline-flex items-center gap-1 rounded bg-primary/10 hover:bg-primary/20 text-primary border border-primary/25 px-2 py-0.5 font-mono text-[11px] font-semibold transition-colors cursor-pointer"
+                          title={`Seek to timestamp (${frame.timestamp_seconds}s)`}
+                        >
+                          <Play className="h-2.5 w-2.5 fill-current" />
+                          <span>
+                            {formatSecondsToPreciseTimestamp(frame.timestamp_seconds)}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {resolvedEndpointWarning && (
+                <div className="rounded-lg bg-warning/10 border border-warning/30 p-3.5 text-xs text-text-primary flex items-start gap-2.5">
+                  <AlertTriangle className="h-4 w-4 text-warning shrink-0 mt-0.5" />
+                  <div className="space-y-0.5">
+                    <span className="font-semibold text-warning block">
+                      {resolvedEndCovered === false
+                        ? "Final Frame Coverage Incomplete"
+                        : "Endpoint Frame Coverage Warning"}
+                    </span>
+                    <p className="text-text-secondary leading-relaxed">
+                      {resolvedEndpointWarning}
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {resolvedSamplingWarning && (
+                <div className="rounded-lg bg-warning/10 border border-warning/30 p-3.5 text-xs text-text-primary flex items-start gap-2.5">
+                  <AlertTriangle className="h-4 w-4 text-warning shrink-0 mt-0.5" />
+                  <div className="space-y-0.5">
+                    <span className="font-semibold text-warning block">
+                      Sampling Ceiling Reached (30 Frames)
+                    </span>
+                    <p className="text-text-secondary leading-relaxed">
+                      {resolvedSamplingWarning}
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              <div className="rounded-lg bg-card p-3.5 text-xs leading-relaxed text-text-secondary border border-card-border space-y-2">
+                <p>
+                  <strong className="text-text-primary">Provider Scope: </strong>
+                  Gemini analyzes the uploaded original video to establish the chronological outfit timeline. Groq enriches individual looks using only the sampled representative JPEG frames and never analyzes the complete video.
+                </p>
+                <p className="text-[11px] text-text-muted">
+                  Evidence policy: Timestamps remain chronological, unsampled intervals are not fabricated, and technical camera hardware or unidentifiable people are never invented.
+                </p>
+              </div>
+
+              {metadata.warnings && metadata.warnings.length > 0 && (
+                <div className="space-y-1.5">
+                  <span className="text-[10px] font-semibold text-warning uppercase tracking-wider block">
+                    Backend Observations:
+                  </span>
+                  <ul className="space-y-1 text-xs text-text-secondary">
+                    {metadata.warnings.map((w, idx) => (
+                      <li key={idx} className="flex items-start gap-2">
+                        <AlertTriangle className="h-3.5 w-3.5 text-warning shrink-0 mt-0.5" />
+                        <span>{w}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
             </div>
           )}
         </div>

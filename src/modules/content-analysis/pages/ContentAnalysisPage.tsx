@@ -2284,7 +2284,9 @@ export const ContentAnalysisPage: React.FC = () => {
       id: "visual",
       label: "Visual Analysis",
       icon: Camera,
-      count: realAudioRecord?.visual_analysis?.scenes?.length
+      count: realAudioRecord?.visual_analysis_gemini_step1?.outfit_changes?.length
+        ? `${realAudioRecord.visual_analysis_gemini_step1.outfit_changes.length}`
+        : realAudioRecord?.visual_analysis?.scenes?.length
         ? `${realAudioRecord.visual_analysis.scenes.length}`
         : currentAnalysis?.visualAnalysis.scenes?.length,
     },

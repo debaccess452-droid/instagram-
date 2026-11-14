@@ -29,6 +29,7 @@ import {
   OriginalScriptSourceStatuses,
   FramePathItem,
   VisualSamplingMetadata,
+  VisualFrameRequest,
 } from "../types/analysis";
 import { contentAnalysisService } from "../services/contentAnalysisService";
 import { supabase } from "@/lib/supabase";
@@ -56,6 +57,19 @@ function normalizeVisualStatus(status?: VisualAnalysisStatus | string | null): s
   return String(status || "").trim().toLowerCase();
 }
 
+function buildGuidedBatchKey(recordId: string, requests: VisualFrameRequest[]): string {
+  const signature = [...requests]
+    .map(
+      (r) =>
+        `${r.look_number}:${Number(r.start_time_seconds).toFixed(3)}-${Number(
+          r.end_time_seconds
+        ).toFixed(3)}@${Number(r.timestamp_seconds).toFixed(3)}`
+    )
+    .sort()
+    .join("|");
+  return `${recordId}::${signature}`;
+}
+
 function isVisualActiveBackendStatus(status?: VisualAnalysisStatus | string | null): boolean {
   const normalized = normalizeVisualStatus(status);
   if (!normalized || normalized === "completed" || normalized === "failed" || normalized === "pending") {
@@ -68,7 +82,9 @@ function isVisualActiveBackendStatus(status?: VisualAnalysisStatus | string | nu
     normalized.includes("step2") ||
     normalized.includes("gemini") ||
     normalized.includes("groq") ||
-    normalized.includes("fallback")
+    normalized.includes("fallback") ||
+    normalized.includes("awaiting") ||
+    normalized.includes("frame")
   );
 }
 
@@ -77,8 +93,9 @@ function isVisualPipelineActive(record?: ContentAnalysisRecord | null): boolean 
   const overall = normalizeVisualStatus(record.visual_analysis_status);
   const step1 = normalizeVisualStatus(record.visual_analysis_step1_status);
   const step2 = normalizeVisualStatus(record.visual_analysis_step2_status);
+  const frameSelection = normalizeVisualStatus(record.visual_analysis_frame_selection_status);
 
-  if (overall === "completed" || overall === "failed") {
+  if (overall === "completed" || overall === "failed" || frameSelection === "failed") {
     return false;
   }
 
@@ -87,7 +104,8 @@ function isVisualPipelineActive(record?: ContentAnalysisRecord | null): boolean 
     step1 === "processing" ||
     step1 === "queued" ||
     step2 === "processing" ||
-    step2 === "queued"
+    step2 === "queued" ||
+    frameSelection === "awaiting_upload"
   );
 }
 
@@ -126,6 +144,9 @@ export const ContentAnalysisPage: React.FC = () => {
   const [isPreparingVisualFrames, setIsPreparingVisualFrames] = useState<boolean>(false);
   const [visualAnalysisError, setVisualAnalysisError] = useState<string | null>(null);
   const [visualProgressMessage, setVisualProgressMessage] = useState<string | null>(null);
+  const [isUploadingGuidedFrames, setIsUploadingGuidedFrames] = useState<boolean>(false);
+  const [guidedFrameMessage, setGuidedFrameMessage] = useState<string | null>(null);
+  const [guidedFrameError, setGuidedFrameError] = useState<string | null>(null);
   const [submittedVisualFrames, setSubmittedVisualFrames] = useState<{
     recordId: string;
     frames: FramePathItem[];
@@ -167,6 +188,10 @@ export const ContentAnalysisPage: React.FC = () => {
   const visualPollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const activeVisualRunIdRef = useRef<string | null>(null);
   const isPreparingVisualFramesRef = useRef<boolean>(false);
+  const isProcessingGuidedFramesRef = useRef<boolean>(false);
+  const inFlightGuidedBatchKeyRef = useRef<string | null>(null);
+  const submittedGuidedBatchKeysRef = useRef<Set<string>>(new Set());
+  const failedGuidedBatchKeyRef = useRef<string | null>(null);
   const textPollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const activeTextRunIdRef = useRef<string | null>(null);
   const isPreparingTextFramesRef = useRef<boolean>(false);
@@ -216,12 +241,34 @@ export const ContentAnalysisPage: React.FC = () => {
     }
 
     const vStatus = normalizeVisualStatus(record.visual_analysis_status);
+    const fStatus = normalizeVisualStatus(record.visual_analysis_frame_selection_status);
     const hasSavedVisualResult = Boolean(record.visual_analysis);
 
     if (vStatus === "completed" || (hasSavedVisualResult && vStatus !== "failed")) {
       stopVisualPolling();
       activeVisualRunIdRef.current = null;
+      isProcessingGuidedFramesRef.current = false;
+      inFlightGuidedBatchKeyRef.current = null;
+      failedGuidedBatchKeyRef.current = null;
       setPreparingVisualFramesState(false);
+      setIsUploadingGuidedFrames(false);
+      setGuidedFrameMessage(null);
+      setGuidedFrameError(null);
+      setIsAnalyzingVisual(false);
+      setVisualProgressMessage(null);
+      setVisualAnalysisError(null);
+    } else if (fStatus === "failed") {
+      stopVisualPolling();
+      activeVisualRunIdRef.current = null;
+      isProcessingGuidedFramesRef.current = false;
+      inFlightGuidedBatchKeyRef.current = null;
+      setPreparingVisualFramesState(false);
+      setIsUploadingGuidedFrames(false);
+      setGuidedFrameMessage(null);
+      setGuidedFrameError(
+        record.visual_analysis_error ||
+          "Timeline-guided frame extraction or upload failed. Gemini Step 1 has been preserved."
+      );
       setIsAnalyzingVisual(false);
       setVisualProgressMessage(null);
       setVisualAnalysisError(null);
@@ -230,10 +277,18 @@ export const ContentAnalysisPage: React.FC = () => {
       setIsAnalyzingVisual(true);
       setVisualProgressMessage(null);
       setVisualAnalysisError(null);
+      if (fStatus === "awaiting_upload") {
+        setGuidedFrameError(null);
+      }
     } else if (vStatus === "failed") {
       stopVisualPolling();
       activeVisualRunIdRef.current = null;
+      isProcessingGuidedFramesRef.current = false;
+      inFlightGuidedBatchKeyRef.current = null;
       setPreparingVisualFramesState(false);
+      setIsUploadingGuidedFrames(false);
+      setGuidedFrameMessage(null);
+      setGuidedFrameError(null);
       setIsAnalyzingVisual(false);
       setVisualProgressMessage(null);
       setVisualAnalysisError(record.visual_analysis_error || "Previous visual analysis failed.");
@@ -241,7 +296,13 @@ export const ContentAnalysisPage: React.FC = () => {
     } else {
       stopVisualPolling();
       activeVisualRunIdRef.current = null;
+      isProcessingGuidedFramesRef.current = false;
+      inFlightGuidedBatchKeyRef.current = null;
+      failedGuidedBatchKeyRef.current = null;
       setPreparingVisualFramesState(false);
+      setIsUploadingGuidedFrames(false);
+      setGuidedFrameMessage(null);
+      setGuidedFrameError(null);
       setIsAnalyzingVisual(false);
       setVisualProgressMessage(null);
       setVisualAnalysisError(null);
@@ -319,10 +380,13 @@ export const ContentAnalysisPage: React.FC = () => {
 
   useEffect(() => {
     return () => {
+      selectionRequestIdRef.current += 1;
       stopVisualPolling();
       stopTextPolling();
       stopScriptPolling();
       activeVisualRunIdRef.current = null;
+      isProcessingGuidedFramesRef.current = false;
+      inFlightGuidedBatchKeyRef.current = null;
       activeTextRunIdRef.current = null;
       activeScriptRunIdRef.current = null;
       isPreparingVisualFramesRef.current = false;
@@ -384,15 +448,23 @@ export const ContentAnalysisPage: React.FC = () => {
 
   // 2. Upload success callback from VideoUploader
   const handleUploadSuccess = (record: ContentAnalysisRecord) => {
+    selectionRequestIdRef.current += 1;
     stopVisualPolling();
     stopTextPolling();
     stopScriptPolling();
     activeVisualRunIdRef.current = null;
+    isProcessingGuidedFramesRef.current = false;
+    inFlightGuidedBatchKeyRef.current = null;
+    failedGuidedBatchKeyRef.current = null;
+    submittedGuidedBatchKeysRef.current.clear();
     activeTextRunIdRef.current = null;
     activeScriptRunIdRef.current = null;
     isGeneratingScriptRef.current = false;
     setPreparingVisualFramesState(false);
     setPreparingTextFramesState(false);
+    setIsUploadingGuidedFrames(false);
+    setGuidedFrameMessage(null);
+    setGuidedFrameError(null);
     setIsAnalyzingVisual(false);
     setIsExtractingText(false);
     setIsGeneratingScript(false);
@@ -637,7 +709,7 @@ export const ContentAnalysisPage: React.FC = () => {
       }
 
       if (result.success) {
-        // Backend accepted the request; keep uploaded frames in storage for worker/Groq fallback
+        // Backend accepted the request; keep uploaded frames in storage for worker/look coverage
         uploadedPathsForCleanup = [];
         setSubmittedVisualFrames({
           recordId: targetRecord.id,
@@ -658,7 +730,11 @@ export const ContentAnalysisPage: React.FC = () => {
 
         setPreparingVisualFramesState(false);
         setVisualProgressMessage(null);
-        const newStatus: VisualAnalysisStatus = result.status || "queued";
+        const immediateAwaiting = Boolean(
+          result.awaitingFrames && result.frameRequests && result.frameRequests.length > 0
+        );
+        const newStatus: VisualAnalysisStatus =
+          result.status || (immediateAwaiting ? "awaiting_upload" : "queued");
 
         setRealAudioRecord((prev) => {
           if (!prev || prev.id !== targetRecord.id) return prev;
@@ -669,6 +745,12 @@ export const ContentAnalysisPage: React.FC = () => {
             file_path: authoritativeFilePath,
             visual_analysis_status: newStatus,
             visual_analysis_error: null,
+            visual_analysis_frame_selection_status: immediateAwaiting
+              ? "awaiting_upload"
+              : prev.visual_analysis_frame_selection_status,
+            visual_analysis_frame_requests: immediateAwaiting
+              ? result.frameRequests || []
+              : prev.visual_analysis_frame_requests,
             // Preserve Gemini Step 1 completion when retrying Step 2; reset failed step states to pending
             visual_analysis_step1_status:
               prevStep1 === "failed" ? "pending" : prev.visual_analysis_step1_status,
@@ -689,11 +771,21 @@ export const ContentAnalysisPage: React.FC = () => {
           }
         }
 
-        // Update history item status to queued
+        // Update history item status
         setHistoryItems((prev) =>
           prev.map((item) =>
             item.id === targetRecord.id
-              ? { ...item, visualAnalysisStatus: newStatus, visualAnalysisError: null }
+              ? {
+                  ...item,
+                  visualAnalysisStatus: newStatus,
+                  visualAnalysisError: null,
+                  visualAnalysisFrameSelectionStatus: immediateAwaiting
+                    ? "awaiting_upload"
+                    : item.visualAnalysisFrameSelectionStatus,
+                  visualAnalysisFrameRequests: immediateAwaiting
+                    ? result.frameRequests || []
+                    : item.visualAnalysisFrameRequests,
+                }
               : item
           )
         );
@@ -784,12 +876,324 @@ export const ContentAnalysisPage: React.FC = () => {
     }
   };
 
-  // 6. Retry Visual Analysis without re-uploading (reuses existing analysisId)
-  const handleRetryVisual = () => {
-    if (realAudioRecord) {
+  // 6. Gemini timeline-guided frame extraction & upload (Step 2)
+  const handleProcessGuidedFrameRequests = async (
+    targetRecord: ContentAnalysisRecord,
+    options?: {
+      isRetry?: boolean;
+      initialRequests?: VisualFrameRequest[];
+      roundCount?: number;
+    }
+  ) => {
+    const requests = options?.initialRequests || targetRecord.visual_analysis_frame_requests || [];
+    if (!targetRecord?.id || requests.length === 0) return;
+
+    const batchKey = buildGuidedBatchKey(targetRecord.id, requests);
+    const roundCount = options?.roundCount ?? 1;
+
+    if (isProcessingGuidedFramesRef.current) {
+      return;
+    }
+
+    if (options?.isRetry) {
+      failedGuidedBatchKeyRef.current = null;
+      submittedGuidedBatchKeysRef.current.delete(batchKey);
+      setGuidedFrameError(null);
+      setVisualAnalysisError(null);
+      setIsAnalyzingVisual(true);
+      setRealAudioRecord((prev) =>
+        prev && prev.id === targetRecord.id
+          ? {
+              ...prev,
+              visual_analysis_frame_selection_status: "awaiting_upload",
+              visual_analysis_error: null,
+            }
+          : prev
+      );
+    } else if (
+      inFlightGuidedBatchKeyRef.current === batchKey ||
+      submittedGuidedBatchKeysRef.current.has(batchKey) ||
+      failedGuidedBatchKeyRef.current === batchKey
+    ) {
+      return;
+    }
+
+    const startSelectionId = selectionRequestIdRef.current;
+    isProcessingGuidedFramesRef.current = true;
+    inFlightGuidedBatchKeyRef.current = batchKey;
+    setIsUploadingGuidedFrames(true);
+    setGuidedFrameError(null);
+    setGuidedFrameMessage(
+      "Gemini outfit timeline completed. Selecting frames for detected outfit looks..."
+    );
+
+    try {
+      const {
+        data: { session },
+        error: sessionError,
+      } = await supabase.auth.getSession();
+
+      const userId = session?.user?.id;
+      if (sessionError || !userId) {
+        throw new Error(
+          "Authentication required: Please sign in to upload timeline-guided visual frames."
+        );
+      }
+
+      if (selectionRequestIdRef.current !== startSelectionId) return;
+
+      const authoritativeFilePath = targetRecord.file_path;
+      if (!authoritativeFilePath) {
+        throw new Error(
+          "Original Reel storage path was not found for timeline-guided frame extraction."
+        );
+      }
+
+      // Extract requested timestamps directly from the original Reel in private reel-uploads bucket
+      const extractedFrames = await contentAnalysisService.extractGuidedVisualFrames(
+        authoritativeFilePath,
+        requests,
+        targetRecord.duration_seconds
+      );
+
+      if (selectionRequestIdRef.current !== startSelectionId) return;
+
+      setGuidedFrameMessage("Uploading missing representative frames...");
+
+      // Upload JPEGs to private visual-analysis-frames bucket with deterministic filenames
+      const uploadedFramePaths = await contentAnalysisService.uploadGuidedVisualFrames(
+        userId,
+        targetRecord.id,
+        extractedFrames
+      );
+
+      if (selectionRequestIdRef.current !== startSelectionId) return;
+
+      // Submit ONLY the newly extracted frame paths and timestamps to analyze-visual
+      const result = await contentAnalysisService.analyzeVisual(
+        targetRecord.id,
+        uploadedFramePaths
+      );
+
+      if (selectionRequestIdRef.current !== startSelectionId) return;
+
+      if (!result.success) {
+        throw new Error(
+          result.error || "Failed to submit timeline-guided frames for Groq visual analysis."
+        );
+      }
+
+      submittedGuidedBatchKeysRef.current.add(batchKey);
+
+      setSubmittedVisualFrames((prev) => {
+        const existing = prev && prev.recordId === targetRecord.id ? prev.frames : [];
+        const byPath = new Map<string, FramePathItem>();
+        for (const item of existing) {
+          byPath.set(item.path, item);
+        }
+        for (const item of uploadedFramePaths) {
+          byPath.set(item.path, item);
+        }
+        const merged = Array.from(byPath.values()).sort(
+          (a, b) => a.timestamp_seconds - b.timestamp_seconds
+        );
+        return {
+          recordId: targetRecord.id,
+          frames: merged,
+          samplingMetadata: prev?.samplingMetadata || {
+            actualDurationSeconds: targetRecord.duration_seconds,
+            firstTimestampSeconds: merged[0]?.timestamp_seconds ?? null,
+            lastTimestampSeconds: merged[merged.length - 1]?.timestamp_seconds ?? null,
+            openingFrameCovered: null,
+            endFrameCovered: null,
+            samplingLimitReached: merged.length >= 30,
+            samplingWarning: null,
+            endpointWarning: null,
+          },
+        };
+      });
+
+      if (result.awaitingFrames && result.frameRequests && result.frameRequests.length > 0) {
+        const nextRequests = result.frameRequests;
+        setRealAudioRecord((prev) =>
+          prev && prev.id === targetRecord.id
+            ? {
+                ...prev,
+                visual_analysis_frame_selection_status: "awaiting_upload",
+                visual_analysis_frame_requests: nextRequests,
+              }
+            : prev
+        );
+
+        if (roundCount < 5) {
+          isProcessingGuidedFramesRef.current = false;
+          inFlightGuidedBatchKeyRef.current = null;
+          await handleProcessGuidedFrameRequests(
+            {
+              ...targetRecord,
+              visual_analysis_frame_selection_status: "awaiting_upload",
+              visual_analysis_frame_requests: nextRequests,
+            },
+            {
+              initialRequests: nextRequests,
+              roundCount: roundCount + 1,
+            }
+          );
+          return;
+        }
+
+        throw new Error(
+          "Additional frame requests remained pending after multiple rounds. Retry frame selection to continue."
+        );
+      }
+
+      setGuidedFrameMessage(
+        "All outfit looks covered. Groq detailed visual analysis running..."
+      );
+
+      const nextOverallStatus: VisualAnalysisStatus = result.visual_analysis
+        ? "completed"
+        : result.status || "processing";
+
+      setRealAudioRecord((prev) =>
+        prev && prev.id === targetRecord.id
+          ? {
+              ...prev,
+              visual_analysis_frame_selection_status: "completed",
+              visual_analysis_frame_requests: [],
+              visual_analysis_status: nextOverallStatus,
+              visual_analysis_error: null,
+            }
+          : prev
+      );
+
+      setHistoryItems((prev) =>
+        prev.map((item) =>
+          item.id === targetRecord.id
+            ? {
+                ...item,
+                visualAnalysisFrameSelectionStatus: "completed",
+                visualAnalysisFrameRequests: [],
+                visualAnalysisStatus: nextOverallStatus,
+                visualAnalysisError: null,
+              }
+            : item
+        )
+      );
+
+      if (result.visual_analysis) {
+        const completedRecord = await contentAnalysisService.fetchAnalysisById(targetRecord.id);
+        if (selectionRequestIdRef.current !== startSelectionId) return;
+        const resolvedRecord: ContentAnalysisRecord = completedRecord || {
+          ...targetRecord,
+          visual_analysis: result.visual_analysis,
+          visual_analysis_status: "completed",
+          visual_analysis_frame_selection_status: "completed",
+          visual_analysis_frame_requests: [],
+          visual_analysis_error: null,
+        };
+        hydrateRealRecordState(resolvedRecord);
+        const updatedHistoryItem = contentAnalysisService.mapRecordToHistoryItem(resolvedRecord);
+        setHistoryItems((prev) => [
+          updatedHistoryItem,
+          ...prev.filter((p) => p.id !== resolvedRecord.id),
+        ]);
+      }
+    } catch (err: any) {
+      if (selectionRequestIdRef.current !== startSelectionId) return;
+      failedGuidedBatchKeyRef.current = batchKey;
+      const msg =
+        err?.message ||
+        "Failed to extract or upload requested timeline-guided frames. Gemini Step 1 is preserved.";
+      setGuidedFrameError(msg);
+      setGuidedFrameMessage(null);
+      setIsAnalyzingVisual(false);
+      setRealAudioRecord((prev) =>
+        prev && prev.id === targetRecord.id
+          ? {
+              ...prev,
+              visual_analysis_frame_selection_status: "awaiting_upload",
+              visual_analysis_frame_requests: requests,
+            }
+          : prev
+      );
+    } finally {
+      if (selectionRequestIdRef.current === startSelectionId) {
+        isProcessingGuidedFramesRef.current = false;
+        inFlightGuidedBatchKeyRef.current = null;
+        setIsUploadingGuidedFrames(false);
+      }
+    }
+  };
+
+  // 6b. Retry timeline-guided frame selection without rerunning Gemini
+  const handleRetryGuidedFrameSelection = () => {
+    if (!realAudioRecord) return;
+    if (
+      realAudioRecord.visual_analysis_frame_requests &&
+      realAudioRecord.visual_analysis_frame_requests.length > 0
+    ) {
+      void handleProcessGuidedFrameRequests(realAudioRecord, { isRetry: true });
+    } else {
       handleAnalyzeVisual(realAudioRecord);
     }
   };
+
+  // 6c. Retry Visual Analysis without re-uploading (preserves completed Step 1 & frame selection where possible)
+  const handleRetryVisual = () => {
+    if (!realAudioRecord) return;
+    const step1Done =
+      normalizeVisualStatus(realAudioRecord.visual_analysis_step1_status) === "completed";
+    const frameStatus = normalizeVisualStatus(
+      realAudioRecord.visual_analysis_frame_selection_status
+    );
+    const hasRequests =
+      Array.isArray(realAudioRecord.visual_analysis_frame_requests) &&
+      realAudioRecord.visual_analysis_frame_requests.length > 0;
+
+    if (
+      step1Done &&
+      hasRequests &&
+      (Boolean(guidedFrameError) ||
+        frameStatus === "failed" ||
+        frameStatus === "awaiting_upload")
+    ) {
+      handleRetryGuidedFrameSelection();
+      return;
+    }
+
+    handleAnalyzeVisual(realAudioRecord);
+  };
+
+  // 6d. Automatically start timeline-guided extraction whenever DB reports awaiting_upload with requests
+  useEffect(() => {
+    if (!realAudioRecord?.id || isPreparingVisualFrames || guidedFrameError) {
+      return;
+    }
+
+    const frameSelection = normalizeVisualStatus(
+      realAudioRecord.visual_analysis_frame_selection_status
+    );
+    const requests = realAudioRecord.visual_analysis_frame_requests || [];
+    const overall = normalizeVisualStatus(realAudioRecord.visual_analysis_status);
+
+    if (
+      overall !== "completed" &&
+      overall !== "failed" &&
+      frameSelection === "awaiting_upload" &&
+      requests.length > 0 &&
+      !isProcessingGuidedFramesRef.current
+    ) {
+      void handleProcessGuidedFrameRequests(realAudioRecord);
+    }
+  }, [
+    realAudioRecord?.id,
+    realAudioRecord?.visual_analysis_status,
+    realAudioRecord?.visual_analysis_frame_selection_status,
+    realAudioRecord?.visual_analysis_frame_requests,
+    isPreparingVisualFrames,
+    guidedFrameError,
+  ]);
 
   // 7. Poll existing content_analyses record every 5 seconds ONLY when sequential visual job is active
   useEffect(() => {
@@ -797,7 +1201,7 @@ export const ContentAnalysisPage: React.FC = () => {
     const isPipelineActive = isVisualPipelineActive(realAudioRecord);
 
     // Never poll while local browser frame extraction/upload is in progress
-    if (isPreparingVisualFrames) {
+    if (isPreparingVisualFrames || isUploadingGuidedFrames || guidedFrameError) {
       stopVisualPolling();
       return;
     }
@@ -819,11 +1223,20 @@ export const ContentAnalysisPage: React.FC = () => {
         const polledStatus = normalizeVisualStatus(statusData.visual_analysis_status);
         const polledStep1 = normalizeVisualStatus(statusData.visual_analysis_step1_status);
         const polledStep2 = normalizeVisualStatus(statusData.visual_analysis_step2_status);
+        const polledFrameStatus = normalizeVisualStatus(
+          statusData.visual_analysis_frame_selection_status
+        );
 
         if (polledStatus === "completed") {
           stopVisualPolling();
           activeVisualRunIdRef.current = null;
+          isProcessingGuidedFramesRef.current = false;
+          inFlightGuidedBatchKeyRef.current = null;
+          failedGuidedBatchKeyRef.current = null;
           setPreparingVisualFramesState(false);
+          setIsUploadingGuidedFrames(false);
+          setGuidedFrameMessage(null);
+          setGuidedFrameError(null);
           setIsAnalyzingVisual(false);
           setVisualProgressMessage(null);
           setVisualAnalysisError(null);
@@ -854,28 +1267,49 @@ export const ContentAnalysisPage: React.FC = () => {
                       statusData.visual_analysis_step1_status ?? prev.visual_analysis_step1_status,
                     visual_analysis_step2_status:
                       statusData.visual_analysis_step2_status ?? prev.visual_analysis_step2_status,
+                    visual_analysis_frame_requests:
+                      statusData.visual_analysis_frame_requests ??
+                      prev.visual_analysis_frame_requests,
+                    visual_analysis_frame_selection_status:
+                      statusData.visual_analysis_frame_selection_status ??
+                      prev.visual_analysis_frame_selection_status,
                   }
                 : prev
             );
           }
-        } else if (polledStatus === "failed") {
+        } else if (polledStatus === "failed" || polledFrameStatus === "failed") {
           stopVisualPolling();
           activeVisualRunIdRef.current = null;
+          isProcessingGuidedFramesRef.current = false;
+          inFlightGuidedBatchKeyRef.current = null;
           setPreparingVisualFramesState(false);
+          setIsUploadingGuidedFrames(false);
+          setGuidedFrameMessage(null);
           setIsAnalyzingVisual(false);
           setVisualProgressMessage(null);
+
+          const isFrameStageFailure =
+            polledFrameStatus === "failed" && polledStep1 === "completed";
           const errorMsg =
             statusData.visual_analysis_error ||
-            (polledStep1 === "completed" && polledStep2 === "failed"
-              ? "Groq adaptive frame analysis (Step 2) failed. Gemini Step 1 outfit timeline has been preserved."
+            (isFrameStageFailure
+              ? "Timeline-guided frame selection failed. Gemini Step 1 outfit timeline has been preserved."
+              : polledStep1 === "completed" && polledStep2 === "failed"
+              ? "Groq detailed visual analysis (Step 2) failed. Gemini Step 1 outfit timeline has been preserved."
               : "Visual analysis was unable to complete.");
-          setVisualAnalysisError(errorMsg);
+
+          if (isFrameStageFailure) {
+            setGuidedFrameError(errorMsg);
+            setVisualAnalysisError(null);
+          } else {
+            setVisualAnalysisError(errorMsg);
+          }
 
           setRealAudioRecord((prev) =>
             prev && prev.id === currentRecordId
               ? {
                   ...prev,
-                  visual_analysis_status: "failed",
+                  visual_analysis_status: statusData.visual_analysis_status ?? "failed",
                   visual_analysis_error: errorMsg,
                   visual_analysis_gemini_step1:
                     statusData.visual_analysis_gemini_step1 ?? prev.visual_analysis_gemini_step1,
@@ -885,6 +1319,12 @@ export const ContentAnalysisPage: React.FC = () => {
                     statusData.visual_analysis_step1_status ?? prev.visual_analysis_step1_status,
                   visual_analysis_step2_status:
                     statusData.visual_analysis_step2_status ?? prev.visual_analysis_step2_status,
+                  visual_analysis_frame_requests:
+                    statusData.visual_analysis_frame_requests ??
+                    prev.visual_analysis_frame_requests,
+                  visual_analysis_frame_selection_status:
+                    statusData.visual_analysis_frame_selection_status ??
+                    prev.visual_analysis_frame_selection_status,
                 }
               : prev
           );
@@ -894,7 +1334,7 @@ export const ContentAnalysisPage: React.FC = () => {
               item.id === currentRecordId
                 ? {
                     ...item,
-                    visualAnalysisStatus: "failed",
+                    visualAnalysisStatus: statusData.visual_analysis_status ?? "failed",
                     visualAnalysisError: errorMsg,
                     visualAnalysisGeminiStep1:
                       statusData.visual_analysis_gemini_step1 ?? item.visualAnalysisGeminiStep1,
@@ -904,32 +1344,49 @@ export const ContentAnalysisPage: React.FC = () => {
                       statusData.visual_analysis_step1_status ?? item.visualAnalysisStep1Status,
                     visualAnalysisStep2Status:
                       statusData.visual_analysis_step2_status ?? item.visualAnalysisStep2Status,
+                    visualAnalysisFrameRequests:
+                      statusData.visual_analysis_frame_requests ??
+                      item.visualAnalysisFrameRequests,
+                    visualAnalysisFrameSelectionStatus:
+                      statusData.visual_analysis_frame_selection_status ??
+                      item.visualAnalysisFrameSelectionStatus,
                   }
                 : item
             )
           );
         } else {
-          // Sequential progress tick: immediately surface Step 1 Gemini result and step statuses
+          // Sequential progress tick: surface Step 1 result, frame requests, and step statuses
           setVisualProgressMessage(null);
+          if (
+            polledStep1 === "completed" &&
+            polledFrameStatus === "completed" &&
+            polledStep2 === "processing"
+          ) {
+            setGuidedFrameMessage(
+              "All outfit looks covered. Groq detailed visual analysis running..."
+            );
+          } else if (polledFrameStatus !== "awaiting_upload" && !isProcessingGuidedFramesRef.current) {
+            setGuidedFrameMessage(null);
+          }
+
           setRealAudioRecord((prev) => {
             if (!prev || prev.id !== currentRecordId) return prev;
-            const nextStatus = statusData.visual_analysis_status ?? prev.visual_analysis_status;
-            const nextStep1Status =
-              statusData.visual_analysis_step1_status ?? prev.visual_analysis_step1_status;
-            const nextStep2Status =
-              statusData.visual_analysis_step2_status ?? prev.visual_analysis_step2_status;
-            const nextGeminiStep1 =
-              statusData.visual_analysis_gemini_step1 ?? prev.visual_analysis_gemini_step1;
-            const nextGroqStep2 =
-              statusData.visual_analysis_groq_step2 ?? prev.visual_analysis_groq_step2;
-
             return {
               ...prev,
-              visual_analysis_status: nextStatus,
-              visual_analysis_step1_status: nextStep1Status,
-              visual_analysis_step2_status: nextStep2Status,
-              visual_analysis_gemini_step1: nextGeminiStep1,
-              visual_analysis_groq_step2: nextGroqStep2,
+              visual_analysis_status:
+                statusData.visual_analysis_status ?? prev.visual_analysis_status,
+              visual_analysis_step1_status:
+                statusData.visual_analysis_step1_status ?? prev.visual_analysis_step1_status,
+              visual_analysis_step2_status:
+                statusData.visual_analysis_step2_status ?? prev.visual_analysis_step2_status,
+              visual_analysis_gemini_step1:
+                statusData.visual_analysis_gemini_step1 ?? prev.visual_analysis_gemini_step1,
+              visual_analysis_groq_step2:
+                statusData.visual_analysis_groq_step2 ?? prev.visual_analysis_groq_step2,
+              visual_analysis_frame_requests: statusData.visual_analysis_frame_requests,
+              visual_analysis_frame_selection_status:
+                statusData.visual_analysis_frame_selection_status ??
+                prev.visual_analysis_frame_selection_status,
             };
           });
         }
@@ -950,7 +1407,10 @@ export const ContentAnalysisPage: React.FC = () => {
     realAudioRecord?.visual_analysis_status,
     realAudioRecord?.visual_analysis_step1_status,
     realAudioRecord?.visual_analysis_step2_status,
+    realAudioRecord?.visual_analysis_frame_selection_status,
     isPreparingVisualFrames,
+    isUploadingGuidedFrames,
+    guidedFrameError,
   ]);
 
   // 8. Independent On-Screen Text Extraction invocation via 'analyze-text' (explicit action only)
@@ -1699,11 +2159,18 @@ export const ContentAnalysisPage: React.FC = () => {
     stopTextPolling();
     stopScriptPolling();
     activeVisualRunIdRef.current = null;
+    isProcessingGuidedFramesRef.current = false;
+    inFlightGuidedBatchKeyRef.current = null;
+    failedGuidedBatchKeyRef.current = null;
+    submittedGuidedBatchKeysRef.current.clear();
     activeTextRunIdRef.current = null;
     activeScriptRunIdRef.current = null;
     isGeneratingScriptRef.current = false;
     setPreparingVisualFramesState(false);
     setPreparingTextFramesState(false);
+    setIsUploadingGuidedFrames(false);
+    setGuidedFrameMessage(null);
+    setGuidedFrameError(null);
     setIsAnalyzingVisual(false);
     setIsExtractingText(false);
     setIsGeneratingScript(false);
@@ -1765,15 +2232,23 @@ export const ContentAnalysisPage: React.FC = () => {
     await contentAnalysisService.deleteUserAnalysis(id, filePath);
     setHistoryItems((prev) => prev.filter((item) => item.id !== id));
     if (realAudioRecord?.id === id) {
+      selectionRequestIdRef.current += 1;
       stopVisualPolling();
       stopTextPolling();
       stopScriptPolling();
       activeVisualRunIdRef.current = null;
+      isProcessingGuidedFramesRef.current = false;
+      inFlightGuidedBatchKeyRef.current = null;
+      failedGuidedBatchKeyRef.current = null;
+      submittedGuidedBatchKeysRef.current.clear();
       activeTextRunIdRef.current = null;
       activeScriptRunIdRef.current = null;
       isGeneratingScriptRef.current = false;
       setPreparingVisualFramesState(false);
       setPreparingTextFramesState(false);
+      setIsUploadingGuidedFrames(false);
+      setGuidedFrameMessage(null);
+      setGuidedFrameError(null);
       setIsAnalyzingVisual(false);
       setIsExtractingText(false);
       setIsGeneratingScript(false);
@@ -2105,6 +2580,12 @@ export const ContentAnalysisPage: React.FC = () => {
                       groqStep2Data={realAudioRecord.visual_analysis_groq_step2}
                       step1Status={realAudioRecord.visual_analysis_step1_status}
                       step2Status={realAudioRecord.visual_analysis_step2_status}
+                      frameRequests={realAudioRecord.visual_analysis_frame_requests || []}
+                      frameSelectionStatus={realAudioRecord.visual_analysis_frame_selection_status}
+                      guidedFrameMessage={guidedFrameMessage}
+                      guidedFrameError={guidedFrameError}
+                      isUploadingGuidedFrames={isUploadingGuidedFrames}
+                      onRetryFrameSelection={handleRetryGuidedFrameSelection}
                       status={realAudioRecord.visual_analysis_status}
                       errorMessage={
                         normalizeVisualStatus(realAudioRecord.visual_analysis_status) === "completed"

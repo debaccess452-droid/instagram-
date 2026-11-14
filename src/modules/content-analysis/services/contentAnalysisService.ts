@@ -9,6 +9,8 @@ import {
   VisualGeminiStep1Result,
   VisualStep1Status,
   VisualStep2Status,
+  VisualFrameRequest,
+  VisualFrameSelectionStatus,
   TextExtractionBackendResult,
   TextExtractionStatus,
   OriginalScriptBackendResult,
@@ -264,6 +266,41 @@ class ContentAnalysisService {
     return null;
   }
 
+  private normalizeFrameRequests(raw: unknown): VisualFrameRequest[] {
+    let parsed: unknown = raw;
+    if (typeof raw === "string") {
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        return [];
+      }
+    }
+    if (!Array.isArray(parsed)) return [];
+
+    const normalized: VisualFrameRequest[] = [];
+    for (const item of parsed) {
+      if (!item || typeof item !== "object") continue;
+      const obj = item as Record<string, unknown>;
+      const lookNumber = Number(obj.look_number ?? obj.outfit_number ?? 1);
+      const startSec = Number(obj.start_time_seconds ?? obj.start_time ?? 0);
+      const endSec = Number(obj.end_time_seconds ?? obj.end_time ?? startSec);
+      const timestampSec = Number(obj.timestamp_seconds ?? (startSec + endSec) / 2);
+
+      if (!Number.isFinite(timestampSec) || timestampSec < 0) continue;
+
+      normalized.push({
+        look_number: Number.isFinite(lookNumber) && lookNumber > 0 ? Math.round(lookNumber) : 1,
+        start_time_seconds: Number.isFinite(startSec) && startSec >= 0 ? startSec : 0,
+        end_time_seconds:
+          Number.isFinite(endSec) && endSec >= 0 ? Math.max(endSec, startSec || 0) : timestampSec,
+        timestamp_seconds: timestampSec,
+        reason: typeof obj.reason === "string" ? obj.reason : null,
+      });
+    }
+
+    return normalized;
+  }
+
   private normalizeRecord(row: any): ContentAnalysisRecord {
     return {
       ...(row as ContentAnalysisRecord),
@@ -278,6 +315,11 @@ class ContentAnalysisService {
         (row?.visual_analysis_step1_status as VisualStep1Status) || null,
       visual_analysis_step2_status:
         (row?.visual_analysis_step2_status as VisualStep2Status) || null,
+      visual_analysis_frame_requests: this.normalizeFrameRequests(
+        row?.visual_analysis_frame_requests
+      ),
+      visual_analysis_frame_selection_status:
+        (row?.visual_analysis_frame_selection_status as VisualFrameSelectionStatus) || null,
       text_extraction: this.normalizeTextExtraction(row?.text_extraction),
       original_script: this.normalizeOriginalScript(row?.original_script),
     };
@@ -1841,6 +1883,482 @@ class ContentAnalysisService {
   }
 
   /**
+   * Builds a deterministic positive integer frame suffix from Gemini look_number and
+   * requested timestamp so retries overwrite cleanly without creating duplicate files.
+   * Example: look 2 at 1.25s -> 1020001250 -> frame-1020001250.jpg
+   */
+  private buildDeterministicGuidedFrameNumber(
+    lookNumber: number,
+    requestedTimestampSeconds: number,
+    usedNumbers: Set<number>
+  ): number {
+    const safeLook = Math.max(0, Math.min(99, Math.round(lookNumber)));
+    const safeTsMs = Math.max(
+      0,
+      Math.min(999_999, Math.round(Math.max(0, requestedTimestampSeconds) * 1000))
+    );
+    let candidate = 1_000_000_000 + safeLook * 10_000_000 + safeTsMs;
+    while (usedNumbers.has(candidate)) {
+      candidate++;
+    }
+    usedNumbers.add(candidate);
+    return candidate;
+  }
+
+  /**
+   * Selects up to maxFrames requests while preserving coverage across all unique look_numbers first.
+   */
+  private prioritizeGuidedRequestsWithinLimit(
+    requests: VisualFrameRequest[],
+    maxFrames = 30
+  ): VisualFrameRequest[] {
+    if (requests.length <= maxFrames) {
+      return [...requests].sort((a, b) => a.timestamp_seconds - b.timestamp_seconds);
+    }
+
+    const sorted = [...requests].sort((a, b) => a.timestamp_seconds - b.timestamp_seconds);
+    const chosenIndices = new Set<number>();
+    const coveredLooks = new Set<number>();
+
+    // Pass 1: Guarantee at least one frame for every distinct Gemini look_number
+    for (let i = 0; i < sorted.length; i++) {
+      if (chosenIndices.size >= maxFrames) break;
+      const look = sorted[i].look_number;
+      if (!coveredLooks.has(look)) {
+        coveredLooks.add(look);
+        chosenIndices.add(i);
+      }
+    }
+
+    // Pass 2: Fill remaining capacity chronologically
+    for (let i = 0; i < sorted.length; i++) {
+      if (chosenIndices.size >= maxFrames) break;
+      chosenIndices.add(i);
+    }
+
+    return Array.from(chosenIndices)
+      .sort((a, b) => a - b)
+      .map((idx) => sorted[idx]);
+  }
+
+  /**
+   * Extracts frames from the original uploaded Reel in private `reel-uploads` storage
+   * at the timestamps requested by Gemini Step 1 (`visual_analysis_frame_requests`).
+   *
+   * - Obtains a short-lived signed URL for the private `reel-uploads` video first.
+   * - Loads the original video via HTML `<video>` with metadata & seek completion waits.
+   * - Clamps out-of-range timestamps safely while keeping them within each requested outfit interval.
+   * - Captures via `<canvas>` (max dimension <= 960px, JPEG quality ~0.72, < 2 MB).
+   * - Falls back transparently to authenticated Storage Blob download if CORS restricts
+   *   cross-origin canvas export on the signed URL.
+   */
+  public async extractGuidedVisualFrames(
+    filePath: string,
+    requests: VisualFrameRequest[],
+    fallbackDurationSeconds?: number | null
+  ): Promise<
+    Array<{
+      blob: Blob;
+      timestamp_seconds: number;
+      look_number: number;
+      requested_timestamp_seconds: number;
+      reason?: string | null;
+    }>
+  > {
+    if (!filePath) {
+      throw new Error("Original Reel storage path is required for guided frame extraction.");
+    }
+    if (!Array.isArray(requests) || requests.length === 0) {
+      throw new Error("No Gemini frame requests provided for extraction.");
+    }
+
+    const prioritizedRequests = this.prioritizeGuidedRequestsWithinLimit(requests, 30);
+
+    const extractFromMediaSource = async (
+      src: string,
+      useCrossOrigin: boolean
+    ): Promise<
+      Array<{
+        blob: Blob;
+        timestamp_seconds: number;
+        look_number: number;
+        requested_timestamp_seconds: number;
+        reason?: string | null;
+      }>
+    > => {
+      const video = document.createElement("video");
+      if (useCrossOrigin) {
+        video.crossOrigin = "anonymous";
+      }
+      video.preload = "auto";
+      video.muted = true;
+      video.playsInline = true;
+
+      const encodeCanvas = document.createElement("canvas");
+
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(() => {
+            cleanupListeners();
+            reject(new Error("Timed out loading original Reel metadata for guided frame capture."));
+          }, 25000);
+
+          const onReady = () => {
+            if (video.readyState >= 2 || (video.readyState >= 1 && video.videoWidth > 0)) {
+              cleanupListeners();
+              clearTimeout(timer);
+              resolve();
+            }
+          };
+
+          const onError = () => {
+            cleanupListeners();
+            clearTimeout(timer);
+            reject(
+              new Error("Unable to load original Reel bitstream in browser for guided frame capture.")
+            );
+          };
+
+          const cleanupListeners = () => {
+            video.removeEventListener("loadedmetadata", onReady);
+            video.removeEventListener("loadeddata", onReady);
+            video.removeEventListener("canplay", onReady);
+            video.removeEventListener("error", onError);
+          };
+
+          video.addEventListener("loadedmetadata", onReady);
+          video.addEventListener("loadeddata", onReady);
+          video.addEventListener("canplay", onReady);
+          video.addEventListener("error", onError);
+          video.src = src;
+          video.load();
+        });
+
+        let rawDuration = video.duration;
+        if (!Number.isFinite(rawDuration) || rawDuration <= 0) {
+          await new Promise<void>((resolve) => {
+            const fallbackTimer = setTimeout(() => {
+              video.removeEventListener("timeupdate", onTimeUpdate);
+              resolve();
+            }, 2500);
+            const onTimeUpdate = () => {
+              video.removeEventListener("timeupdate", onTimeUpdate);
+              clearTimeout(fallbackTimer);
+              resolve();
+            };
+            video.addEventListener("timeupdate", onTimeUpdate);
+            try {
+              video.currentTime = 1e101;
+            } catch {
+              clearTimeout(fallbackTimer);
+              resolve();
+            }
+          });
+          rawDuration = video.duration;
+        }
+
+        const safeDuration =
+          Number.isFinite(rawDuration) && rawDuration > 0
+            ? rawDuration
+            : fallbackDurationSeconds &&
+              Number.isFinite(fallbackDurationSeconds) &&
+              fallbackDurationSeconds > 0
+            ? fallbackDurationSeconds
+            : 0;
+
+        if (safeDuration <= 0) {
+          throw new Error("Could not determine video duration for guided frame extraction.");
+        }
+
+        const seekToTimestamp = async (targetTime: number): Promise<void> => {
+          if (Math.abs(video.currentTime - targetTime) < 0.003 && video.readyState >= 2) {
+            return;
+          }
+
+          await new Promise<void>((resolve, reject) => {
+            const seekTimer = setTimeout(() => {
+              cleanupSeek();
+              reject(new Error(`Timed out seeking original Reel to ${targetTime}s.`));
+            }, 12000);
+
+            const onSeeked = () => {
+              cleanupSeek();
+              clearTimeout(seekTimer);
+              resolve();
+            };
+
+            const onSeekError = () => {
+              cleanupSeek();
+              clearTimeout(seekTimer);
+              reject(new Error(`Seek failed at ${targetTime}s on original Reel.`));
+            };
+
+            const cleanupSeek = () => {
+              video.removeEventListener("seeked", onSeeked);
+              video.removeEventListener("error", onSeekError);
+            };
+
+            video.addEventListener("seeked", onSeeked);
+            video.addEventListener("error", onSeekError);
+            video.currentTime = targetTime;
+          });
+        };
+
+        const waitFramePaint = () =>
+          new Promise<void>((resolve) => {
+            if (typeof requestAnimationFrame === "function") {
+              requestAnimationFrame(() => resolve());
+            } else {
+              setTimeout(resolve, 20);
+            }
+          });
+
+        const encodeCurrentFrameAsJpeg = async (): Promise<Blob> => {
+          const origW = video.videoWidth;
+          const origH = video.videoHeight;
+          if (!origW || !origH) {
+            throw new Error("Video dimensions are unavailable for canvas frame capture.");
+          }
+
+          const maxDim = 960;
+          let targetW = origW;
+          let targetH = origH;
+          if (origW > maxDim || origH > maxDim) {
+            if (origW >= origH) {
+              targetW = maxDim;
+              targetH = Math.max(1, Math.round((origH * maxDim) / origW));
+            } else {
+              targetH = maxDim;
+              targetW = Math.max(1, Math.round((origW * maxDim) / origH));
+            }
+          }
+
+          encodeCanvas.width = targetW;
+          encodeCanvas.height = targetH;
+
+          const ctx = encodeCanvas.getContext("2d");
+          if (!ctx) {
+            throw new Error("Canvas 2D context unavailable for guided frame encoding.");
+          }
+          ctx.drawImage(video, 0, 0, targetW, targetH);
+
+          let quality = 0.72;
+          let frameBlob = await new Promise<Blob | null>((res, rej) => {
+            try {
+              encodeCanvas.toBlob(res, "image/jpeg", quality);
+            } catch (err) {
+              rej(err);
+            }
+          });
+
+          while (frameBlob && frameBlob.size >= 2 * 1024 * 1024 && quality > 0.25) {
+            quality = Number((quality - 0.12).toFixed(2));
+            frameBlob = await new Promise<Blob | null>((res, rej) => {
+              try {
+                encodeCanvas.toBlob(res, "image/jpeg", quality);
+              } catch (err) {
+                rej(err);
+              }
+            });
+          }
+
+          if (!frameBlob || frameBlob.size === 0 || frameBlob.size >= 2 * 1024 * 1024) {
+            throw new Error("Encoded guided JPEG frame is empty or exceeds 2 MB limit.");
+          }
+
+          return frameBlob;
+        };
+
+        const maxSeekable = Math.max(0, Number((safeDuration - 0.02).toFixed(3)));
+        const extracted: Array<{
+          blob: Blob;
+          timestamp_seconds: number;
+          look_number: number;
+          requested_timestamp_seconds: number;
+          reason?: string | null;
+        }> = [];
+
+        for (const req of prioritizedRequests) {
+          let intervalStart = Number.isFinite(req.start_time_seconds)
+            ? Math.max(0, Math.min(req.start_time_seconds, maxSeekable))
+            : 0;
+          let intervalEnd = Number.isFinite(req.end_time_seconds)
+            ? Math.max(0, Math.min(req.end_time_seconds, maxSeekable))
+            : maxSeekable;
+
+          if (intervalEnd < intervalStart) {
+            intervalEnd = Math.min(maxSeekable, intervalStart);
+          }
+
+          const rawTarget = Number.isFinite(req.timestamp_seconds)
+            ? req.timestamp_seconds
+            : (intervalStart + intervalEnd) / 2;
+
+          let targetTime = Number(
+            Math.max(intervalStart, Math.min(rawTarget, intervalEnd)).toFixed(3)
+          );
+
+          let captureAttempted = false;
+          const candidateOffsets = [0, -0.05, 0.05, -0.12];
+
+          for (const offset of candidateOffsets) {
+            const candidate = Number(
+              Math.max(intervalStart, Math.min(targetTime + offset, intervalEnd)).toFixed(3)
+            );
+            if (captureAttempted && candidate === targetTime) continue;
+            captureAttempted = true;
+
+            try {
+              await seekToTimestamp(candidate);
+              await waitFramePaint();
+
+              const currentTime = Number.isFinite(video.currentTime)
+                ? video.currentTime
+                : candidate;
+
+              // Guard against EOF wrap-back to ~0 on seeks away from start
+              if (candidate > 0.25 && currentTime < 0.05) {
+                continue;
+              }
+
+              const blob = await encodeCurrentFrameAsJpeg();
+              const clampedActual = Number(
+                Math.max(0, Math.min(currentTime, safeDuration)).toFixed(3)
+              );
+
+              extracted.push({
+                blob,
+                timestamp_seconds: clampedActual,
+                look_number: req.look_number,
+                requested_timestamp_seconds: targetTime,
+                reason: req.reason ?? null,
+              });
+              break;
+            } catch (stepErr: any) {
+              // If canvas is tainted by CORS on signed URL, bubble immediately to trigger Blob fallback
+              if (
+                stepErr?.name === "SecurityError" ||
+                String(stepErr?.message || "")
+                  .toLowerCase()
+                  .includes("tainted")
+              ) {
+                throw stepErr;
+              }
+            }
+          }
+        }
+
+        if (extracted.length === 0) {
+          throw new Error(
+            "No requested timeline-guided frames could be captured from the original Reel."
+          );
+        }
+
+        return extracted;
+      } finally {
+        encodeCanvas.width = 0;
+        encodeCanvas.height = 0;
+        video.pause();
+        video.removeAttribute("src");
+        video.load();
+      }
+    };
+
+    // 1. Obtain short-lived signed URL for private reel-uploads bucket (never public)
+    const signedUrl = await this.getSignedPlaybackUrl(filePath, 3600);
+    if (signedUrl) {
+      try {
+        return await extractFromMediaSource(signedUrl, true);
+      } catch (signedUrlErr) {
+        console.warn(
+          "[ContentAnalysisService] Signed URL canvas capture fell back to authenticated Storage blob:",
+          signedUrlErr
+        );
+      }
+    }
+
+    // 2. Fallback: download authenticated Blob directly from private reel-uploads bucket
+    const videoBlob = await this.downloadReelVideo(filePath);
+    const objectUrl = URL.createObjectURL(videoBlob);
+    try {
+      return await extractFromMediaSource(objectUrl, false);
+    } finally {
+      URL.revokeObjectURL(objectUrl);
+    }
+  }
+
+  /**
+   * Uploads Gemini-guided JPEG frames to private `visual-analysis-frames` bucket
+   * using deterministic numeric filenames (`{userId}/{analysisId}/frame-{uniqueNumber}.jpg`).
+   */
+  public async uploadGuidedVisualFrames(
+    userId: string,
+    analysisId: string,
+    frames: Array<{
+      blob: Blob;
+      timestamp_seconds: number;
+      look_number: number;
+      requested_timestamp_seconds: number;
+    }>
+  ): Promise<FramePathItem[]> {
+    if (!userId || !analysisId) {
+      throw new Error(
+        "Authenticated user ID and analysis ID are required to upload guided visual frames."
+      );
+    }
+
+    if (!Array.isArray(frames) || frames.length === 0) {
+      throw new Error("No guided frames available to upload.");
+    }
+
+    const usedNumbers = new Set<number>();
+    const uploadedPaths: FramePathItem[] = [];
+
+    for (let i = 0; i < frames.slice(0, 30).length; i++) {
+      const frame = frames[i];
+      if (!frame?.blob || frame.blob.size === 0) {
+        continue;
+      }
+
+      const uniqueNumber = this.buildDeterministicGuidedFrameNumber(
+        frame.look_number,
+        frame.requested_timestamp_seconds ?? frame.timestamp_seconds,
+        usedNumbers
+      );
+      const storagePath = `${userId}/${analysisId}/frame-${uniqueNumber}.jpg`;
+
+      const { data, error } = await supabase.storage
+        .from(VISUAL_FRAMES_BUCKET)
+        .upload(storagePath, frame.blob, {
+          contentType: "image/jpeg",
+          upsert: true,
+        });
+
+      if (error || !data?.path) {
+        console.warn(
+          `[ContentAnalysisService] Failed to upload guided frame for look #${frame.look_number} (${frame.timestamp_seconds}s): ${
+            error?.message || "Upload did not return a path"
+          }`
+        );
+        continue;
+      }
+
+      uploadedPaths.push({
+        path: storagePath,
+        timestamp_seconds: frame.timestamp_seconds,
+      });
+    }
+
+    if (uploadedPaths.length === 0) {
+      throw new Error(
+        "Failed to upload requested timeline-guided frames to private storage."
+      );
+    }
+
+    return uploadedPaths;
+  }
+
+  /**
    * Invokes the deployed Supabase Edge Function 'analyze-visual'
    * for the given analysisId and validated framePaths manifest using the authenticated session.
    * Never invokes analyze-visual with an empty framePaths array.
@@ -1851,6 +2369,9 @@ class ContentAnalysisService {
   ): Promise<{
     success: boolean;
     queued?: boolean;
+    awaitingFrames?: boolean;
+    frameRequests?: VisualFrameRequest[];
+    timelineGuided?: boolean;
     status?: VisualAnalysisStatus;
     analysisId?: string;
     visual_analysis?: VisualBackendResult;
@@ -1926,9 +2447,16 @@ class ContentAnalysisService {
         };
       }
 
+      const frameRequests = this.normalizeFrameRequests(
+        data?.frameRequests ?? data?.frame_requests
+      );
+
       return {
         success: true,
         queued: Boolean(data?.queued),
+        awaitingFrames: Boolean(data?.awaitingFrames ?? data?.awaiting_frames),
+        frameRequests,
+        timelineGuided: Boolean(data?.timelineGuided ?? data?.timeline_guided),
         status: (data?.status as VisualAnalysisStatus) || (data?.queued ? "queued" : "processing"),
         analysisId: data?.analysisId || analysisId,
         visual_analysis: data?.visual_analysis,
@@ -1943,7 +2471,7 @@ class ContentAnalysisService {
 
   /**
    * Polls the user's existing content_analyses record using Supabase.
-   * Selects visual_analysis, visual_analysis_status, and visual_analysis_error,
+   * Selects visual analysis status, step results, and Gemini-guided frame requests,
    * filtered by current analysisId.
    */
   public async pollVisualStatus(analysisId: string): Promise<{
@@ -1954,6 +2482,8 @@ class ContentAnalysisService {
     visual_analysis_groq_step2: VisualBackendResult | Record<string, unknown> | null;
     visual_analysis_step1_status: VisualStep1Status | null;
     visual_analysis_step2_status: VisualStep2Status | null;
+    visual_analysis_frame_requests: VisualFrameRequest[];
+    visual_analysis_frame_selection_status: VisualFrameSelectionStatus | null;
   } | null> {
     try {
       const {
@@ -1968,7 +2498,7 @@ class ContentAnalysisService {
       const { data, error } = await supabase
         .from(TABLE_CONTENT_ANALYSES)
         .select(
-          "visual_analysis, visual_analysis_status, visual_analysis_error, visual_analysis_gemini_step1, visual_analysis_groq_step2, visual_analysis_step1_status, visual_analysis_step2_status"
+          "visual_analysis, visual_analysis_status, visual_analysis_error, visual_analysis_gemini_step1, visual_analysis_groq_step2, visual_analysis_step1_status, visual_analysis_step2_status, visual_analysis_frame_requests, visual_analysis_frame_selection_status"
         )
         .eq("id", analysisId)
         .eq("user_id", session.user.id)
@@ -1992,6 +2522,11 @@ class ContentAnalysisService {
           (data.visual_analysis_step1_status as VisualStep1Status) || null,
         visual_analysis_step2_status:
           (data.visual_analysis_step2_status as VisualStep2Status) || null,
+        visual_analysis_frame_requests: this.normalizeFrameRequests(
+          data.visual_analysis_frame_requests
+        ),
+        visual_analysis_frame_selection_status:
+          (data.visual_analysis_frame_selection_status as VisualFrameSelectionStatus) || null,
       };
     } catch {
       return null;
@@ -2493,6 +3028,9 @@ class ContentAnalysisService {
       visualAnalysisGroqStep2: record.visual_analysis_groq_step2 || null,
       visualAnalysisStep1Status: record.visual_analysis_step1_status || null,
       visualAnalysisStep2Status: record.visual_analysis_step2_status || null,
+      visualAnalysisFrameRequests: record.visual_analysis_frame_requests || [],
+      visualAnalysisFrameSelectionStatus:
+        record.visual_analysis_frame_selection_status || null,
       textExtraction: record.text_extraction || null,
       textExtractionStatus: record.text_extraction_status || null,
       textExtractionError: record.text_extraction_error || null,

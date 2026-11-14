@@ -357,8 +357,26 @@ export type VisualStep2Status =
   | "failed"
   | (string & {});
 
+export type VisualFrameSelectionStatus =
+  | "pending"
+  | "awaiting_upload"
+  | "completed"
+  | "failed"
+  | (string & {});
+
+export interface VisualFrameRequest {
+  look_number: number;
+  start_time_seconds: number;
+  end_time_seconds: number;
+  timestamp_seconds: number;
+  reason?: string | null;
+}
+
 export interface VisualGeminiOutfitChange {
+  look_number?: number;
   outfit_number?: number;
+  start_time?: string | number | null;
+  end_time?: string | number | null;
   start_time_seconds?: number | null;
   end_time_seconds?: number | null;
   estimated_start_seconds?: number | null;
@@ -369,6 +387,11 @@ export interface VisualGeminiOutfitChange {
   end_timestamp?: string | number | null;
   outfit_description?: string | null;
   description?: string | null;
+  visible_evidence?: string | string[] | null;
+  transition_confidence?: string | number | null;
+  camera_framing?: string | null;
+  background?: string | null;
+  warnings?: string[] | null;
   clothing?: string | string[] | null;
   footwear?: string | string[] | null;
   accessories?: string | string[] | null;
@@ -381,6 +404,7 @@ export interface VisualGeminiStep1Result {
   outfit_changes?: VisualGeminiOutfitChange[];
   summary?: string | null;
   video_overview?: VisualBackendOverview;
+  warnings?: string[] | null;
   analysis_metadata?: VisualBackendMetadata;
   [key: string]: unknown;
 }
@@ -637,6 +661,8 @@ export interface ContentAnalysisRecord {
   visual_analysis_groq_step2?: VisualBackendResult | Record<string, unknown> | null;
   visual_analysis_step1_status?: VisualStep1Status | null;
   visual_analysis_step2_status?: VisualStep2Status | null;
+  visual_analysis_frame_requests?: VisualFrameRequest[] | null;
+  visual_analysis_frame_selection_status?: VisualFrameSelectionStatus | null;
 
   // Dedicated On-Screen Text Extraction columns
   text_extraction?: TextExtractionBackendResult | null;
@@ -682,6 +708,8 @@ export interface AnalysisHistoryItem {
   visualAnalysisGroqStep2?: VisualBackendResult | Record<string, unknown> | null;
   visualAnalysisStep1Status?: VisualStep1Status | null;
   visualAnalysisStep2Status?: VisualStep2Status | null;
+  visualAnalysisFrameRequests?: VisualFrameRequest[] | null;
+  visualAnalysisFrameSelectionStatus?: VisualFrameSelectionStatus | null;
 
   // Real On-Screen Text Extraction metadata
   textExtraction?: TextExtractionBackendResult | null;

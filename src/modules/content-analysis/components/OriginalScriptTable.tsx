@@ -50,6 +50,11 @@ export interface OriginalScriptTableProps {
   errorMessage?: string | null;
   errorCode?: string | null;
   sourceStatuses?: OriginalScriptSourceStatuses;
+  sourceAvailability?: {
+    audio?: boolean;
+    visual?: boolean;
+    text?: boolean;
+  };
   incompleteSourcesError?: OriginalScriptSourceStatuses | null;
   sourceMetadata?: {
     audio?: SourceMetadataItem | null;
@@ -96,6 +101,7 @@ export const OriginalScriptTable: React.FC<OriginalScriptTableProps> = ({
   errorMessage,
   errorCode,
   sourceStatuses,
+  sourceAvailability,
   incompleteSourcesError,
   sourceMetadata,
   onGenerateScript,
@@ -134,6 +140,10 @@ export const OriginalScriptTable: React.FC<OriginalScriptTableProps> = ({
       text: resolveSourceStatus(sourceStatuses?.text, incompleteSourcesError?.text),
     };
 
+    const hasSavedAudio = sourceAvailability?.audio ?? true;
+    const hasSavedVisual = sourceAvailability?.visual ?? true;
+    const hasSavedText = sourceAvailability?.text ?? true;
+
     const sourceList: Array<{
       key: "audio" | "visual" | "text";
       label: string;
@@ -147,7 +157,8 @@ export const OriginalScriptTable: React.FC<OriginalScriptTableProps> = ({
         label: "Audio Analysis",
         status: effectiveSourceStatuses.audio,
         normalized: normalizeStatus(effectiveSourceStatuses.audio),
-        completed: normalizeStatus(effectiveSourceStatuses.audio) === "completed",
+        completed:
+          normalizeStatus(effectiveSourceStatuses.audio) === "completed" && hasSavedAudio,
         icon: Volume2,
       },
       {
@@ -155,7 +166,8 @@ export const OriginalScriptTable: React.FC<OriginalScriptTableProps> = ({
         label: "Visual Analysis",
         status: effectiveSourceStatuses.visual,
         normalized: normalizeStatus(effectiveSourceStatuses.visual),
-        completed: normalizeStatus(effectiveSourceStatuses.visual) === "completed",
+        completed:
+          normalizeStatus(effectiveSourceStatuses.visual) === "completed" && hasSavedVisual,
         icon: Camera,
       },
       {
@@ -163,7 +175,8 @@ export const OriginalScriptTable: React.FC<OriginalScriptTableProps> = ({
         label: "Text Extraction",
         status: effectiveSourceStatuses.text,
         normalized: normalizeStatus(effectiveSourceStatuses.text),
-        completed: normalizeStatus(effectiveSourceStatuses.text) === "completed",
+        completed:
+          normalizeStatus(effectiveSourceStatuses.text) === "completed" && hasSavedText,
         icon: Type,
       },
     ];
@@ -176,7 +189,10 @@ export const OriginalScriptTable: React.FC<OriginalScriptTableProps> = ({
       (typeof errorMessage === "string" &&
         errorMessage.includes("SOURCE_ANALYSES_INCOMPLETE"));
 
-    const shouldRenderCompletedRealData = Boolean(realData) && isCompletedStatus;
+    const hasValidRealData = Boolean(
+      realData && typeof realData === "object" && Array.isArray(realData.rows)
+    );
+    const shouldRenderCompletedRealData = hasValidRealData && isCompletedStatus;
 
     // 1. Processing State
     if (
@@ -312,7 +328,7 @@ export const OriginalScriptTable: React.FC<OriginalScriptTableProps> = ({
     }
 
     // 3. Pending / Not Generated State (manual button only, gated by 3 completed sources)
-    if (!realData && (normalizedStatus === "pending" || !normalizedStatus)) {
+    if (!hasValidRealData && (normalizedStatus === "pending" || !normalizedStatus)) {
       return (
         <div className="rounded-2xl border border-card-border bg-card p-6 sm:p-10 shadow-card space-y-6">
           <div className="text-center space-y-3">
@@ -416,7 +432,7 @@ export const OriginalScriptTable: React.FC<OriginalScriptTableProps> = ({
                 leftIcon={<Sparkles className="h-5 w-5" />}
                 className="shadow-glow-primary py-3 px-6 cursor-pointer"
               >
-                {isProcessing ? "Starting..." : "Generate Original Script"}
+                {isProcessing ? "Starting..." : "Generate Original Reel Script"}
               </Button>
             </div>
           )}
@@ -425,7 +441,7 @@ export const OriginalScriptTable: React.FC<OriginalScriptTableProps> = ({
     }
 
     // 4. Completed status with missing payload edge case
-    if (isCompletedStatus && !realData) {
+    if (isCompletedStatus && !hasValidRealData) {
       return (
         <div className="rounded-2xl border border-card-border bg-card p-6 sm:p-8 shadow-card space-y-3">
           <div className="flex items-start gap-3.5">
@@ -446,7 +462,7 @@ export const OriginalScriptTable: React.FC<OriginalScriptTableProps> = ({
     }
 
     // 5. Completed + Saved Real Backend Script Result
-    if (realData) {
+    if (shouldRenderCompletedRealData && realData) {
       const rawRows: OriginalScriptBackendRow[] = Array.isArray(realData.rows)
         ? realData.rows
         : [];

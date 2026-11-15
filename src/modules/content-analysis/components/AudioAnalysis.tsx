@@ -216,6 +216,40 @@ export const AudioAnalysis: React.FC<AudioAnalysisProps> = ({
     );
   }
 
+  // 3b. Completed status with missing payload edge case
+  if (status === "completed" && !realData && !data) {
+    return (
+      <div className="rounded-2xl border border-card-border bg-card p-6 sm:p-8 shadow-card space-y-4">
+        <div className="flex items-start gap-3.5">
+          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-warning/15 text-warning shrink-0 border border-warning/25">
+            <AlertTriangle className="h-5 w-5" />
+          </div>
+          <div className="space-y-1 flex-1">
+            <h3 className="text-base font-bold text-text-primary">
+              Audio Analysis Result Unavailable
+            </h3>
+            <p className="text-xs text-text-secondary leading-relaxed">
+              This analysis record is marked as completed, but no audio analysis payload was saved.
+            </p>
+          </div>
+        </div>
+        {onRetry && (
+          <div className="flex justify-end pt-2 border-t border-card-border/80">
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={onRetry}
+              disabled={isProcessing}
+              leftIcon={<RotateCcw className="h-4 w-4" />}
+            >
+              Retry Audio Analysis
+            </Button>
+          </div>
+        )}
+      </div>
+    );
+  }
+
   // =========================================================================
   // REAL BACKEND DATA RENDERING (AudioBackendResult)
   // =========================================================================

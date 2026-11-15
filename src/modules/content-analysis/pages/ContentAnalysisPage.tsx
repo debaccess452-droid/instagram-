@@ -39,6 +39,13 @@ import { VideoUploader } from "../components/VideoUploader";
 import { VideoPreviewPlayer, VideoPreviewPlayerRef } from "../components/VideoPreviewPlayer";
 import { AnalysisProgressModal } from "../components/AnalysisProgressModal";
 import { AnalysisOverview } from "../components/AnalysisOverview";
+import {
+  RealOverviewPipeline,
+  hasSavedAudioResult,
+  hasSavedVisualResult,
+  hasSavedTextResult,
+  hasSavedOriginalScriptResult,
+} from "../components/RealOverviewPipeline";
 import { AudioAnalysis } from "../components/AudioAnalysis";
 import { VisualAnalysis } from "../components/VisualAnalysis";
 import { TextExtraction } from "../components/TextExtraction";
@@ -161,6 +168,7 @@ export const ContentAnalysisPage: React.FC = () => {
   const [originalScriptErrorCode, setOriginalScriptErrorCode] = useState<string | null>(null);
   const [originalScriptIncompleteSources, setOriginalScriptIncompleteSources] =
     useState<OriginalScriptSourceStatuses | null>(null);
+  const [isRefreshingRecord, setIsRefreshingRecord] = useState<boolean>(false);
 
   const [activeTab, setActiveTabState] = useState<AnalysisTabType>(getInitialActiveTab);
   const setActiveTab = (tab: AnalysisTabType) => {
@@ -185,6 +193,7 @@ export const ContentAnalysisPage: React.FC = () => {
   }>({ file: null, duration: 28.5 });
 
   const playerRef = useRef<VideoPreviewPlayerRef>(null);
+  const audioPollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const visualPollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const activeVisualRunIdRef = useRef<string | null>(null);
   const isPreparingVisualFramesRef = useRef<boolean>(false);
@@ -208,6 +217,13 @@ export const ContentAnalysisPage: React.FC = () => {
   const setPreparingTextFramesState = (value: boolean) => {
     isPreparingTextFramesRef.current = value;
     setIsPreparingTextFrames(value);
+  };
+
+  const stopAudioPolling = () => {
+    if (audioPollingRef.current) {
+      clearInterval(audioPollingRef.current);
+      audioPollingRef.current = null;
+    }
   };
 
   const stopVisualPolling = () => {
@@ -341,9 +357,9 @@ export const ContentAnalysisPage: React.FC = () => {
     }
 
     const sStatus = normalizeVisualStatus(record.original_script_status);
-    const hasSavedScript = Boolean(record.original_script);
+    const hasSavedScript = hasSavedOriginalScriptResult(record);
 
-    if (sStatus === "completed" || (hasSavedScript && sStatus !== "failed")) {
+    if (sStatus === "completed" && hasSavedScript) {
       stopScriptPolling();
       activeScriptRunIdRef.current = null;
       isGeneratingScriptRef.current = false;
@@ -378,9 +394,86 @@ export const ContentAnalysisPage: React.FC = () => {
     }
   };
 
+  const refreshSelectedAnalysisRecord = async (targetRecordId?: string) => {
+    const idToFetch = targetRecordId || realAudioRecord?.id;
+    if (!idToFetch) return;
+
+    if (
+      isPreparingVisualFramesRef.current ||
+      isPreparingTextFramesRef.current ||
+      isProcessingGuidedFramesRef.current ||
+      isGeneratingScriptRef.current
+    ) {
+      return;
+    }
+
+    const requestIdAtStart = selectionRequestIdRef.current;
+    setIsRefreshingRecord(true);
+    try {
+      const freshRecord = await contentAnalysisService.fetchAnalysisById(idToFetch);
+      if (
+        !freshRecord ||
+        requestIdAtStart !== selectionRequestIdRef.current ||
+        isPreparingVisualFramesRef.current ||
+        isPreparingTextFramesRef.current ||
+        isProcessingGuidedFramesRef.current ||
+        isGeneratingScriptRef.current
+      ) {
+        return;
+      }
+
+      hydrateRealRecordState(freshRecord);
+      const updatedItem = contentAnalysisService.mapRecordToHistoryItem(freshRecord);
+      setHistoryItems((prev) => [
+        updatedItem,
+        ...prev.filter((p) => p.id !== freshRecord.id),
+      ]);
+    } finally {
+      if (requestIdAtStart === selectionRequestIdRef.current) {
+        setIsRefreshingRecord(false);
+      }
+    }
+  };
+
+  const handleOpenTabForSelectedReel = (tab: AnalysisTabType) => {
+    if (realAudioRecord?.id) {
+      localStorage.setItem(ACTIVE_ANALYSIS_STORAGE_KEY, realAudioRecord.id);
+      setCurrentAnalysis(null);
+      setIsUploadMode(false);
+    }
+    setActiveTab(tab);
+    if (
+      realAudioRecord?.id &&
+      (tab === "overview" ||
+        tab === "audio" ||
+        tab === "visual" ||
+        tab === "text" ||
+        tab === "script")
+    ) {
+      void refreshSelectedAnalysisRecord(realAudioRecord.id);
+    }
+  };
+
+  const handleViewRealAudioAnalysis = () => {
+    handleOpenTabForSelectedReel("audio");
+  };
+
+  const handleViewRealVisualAnalysis = () => {
+    handleOpenTabForSelectedReel("visual");
+  };
+
+  const handleViewTextExtraction = () => {
+    handleOpenTabForSelectedReel("text");
+  };
+
+  const handleViewOriginalScript = () => {
+    handleOpenTabForSelectedReel("script");
+  };
+
   useEffect(() => {
     return () => {
       selectionRequestIdRef.current += 1;
+      stopAudioPolling();
       stopVisualPolling();
       stopTextPolling();
       stopScriptPolling();
@@ -449,6 +542,7 @@ export const ContentAnalysisPage: React.FC = () => {
   // 2. Upload success callback from VideoUploader
   const handleUploadSuccess = (record: ContentAnalysisRecord) => {
     selectionRequestIdRef.current += 1;
+    stopAudioPolling();
     stopVisualPolling();
     stopTextPolling();
     stopScriptPolling();
@@ -561,6 +655,47 @@ export const ContentAnalysisPage: React.FC = () => {
       handleAnalyzeAudio(realAudioRecord);
     }
   };
+
+  // 4b. Read-only poll if DB reports audio_analysis_status === 'processing' across page reload
+  useEffect(() => {
+    const currentRecordId = realAudioRecord?.id;
+    const normalizedAudioStatus = normalizeVisualStatus(realAudioRecord?.audio_analysis_status);
+
+    if (!currentRecordId || normalizedAudioStatus !== "processing" || isAnalyzingAudio) {
+      stopAudioPolling();
+      return;
+    }
+
+    let isCancelled = false;
+    stopAudioPolling();
+
+    const pollAudio = async () => {
+      try {
+        const freshRecord = await contentAnalysisService.fetchAnalysisById(currentRecordId);
+        if (isCancelled || !freshRecord) return;
+        const polledAudioStatus = normalizeVisualStatus(freshRecord.audio_analysis_status);
+
+        if (polledAudioStatus !== "processing") {
+          stopAudioPolling();
+          hydrateRealRecordState(freshRecord);
+          const updatedItem = contentAnalysisService.mapRecordToHistoryItem(freshRecord);
+          setHistoryItems((prev) => [
+            updatedItem,
+            ...prev.filter((p) => p.id !== freshRecord.id),
+          ]);
+        }
+      } catch (err) {
+        console.warn("[ContentAnalysisPage] Audio polling tick error:", err);
+      }
+    };
+
+    audioPollingRef.current = setInterval(pollAudio, 5000);
+
+    return () => {
+      isCancelled = true;
+      stopAudioPolling();
+    };
+  }, [realAudioRecord?.id, realAudioRecord?.audio_analysis_status, isAnalyzingAudio]);
 
   // 5. Real Visual Analysis invocation via Supabase Edge Function 'analyze-visual' (explicit action only)
   const handleAnalyzeVisual = async (recordToAnalyze?: ContentAnalysisRecord | null) => {
@@ -1774,11 +1909,13 @@ export const ContentAnalysisPage: React.FC = () => {
 
     // Never regenerate an already-completed script with saved result
     const initialStatus = normalizeVisualStatus(targetRecord.original_script_status);
-    if (initialStatus === "completed" && targetRecord.original_script) {
+    if (initialStatus === "completed" && hasSavedOriginalScriptResult(targetRecord)) {
       hydrateRealRecordState(targetRecord);
       setCurrentAnalysis(null);
       setIsUploadMode(false);
-      setActiveTab("script");
+      if (activeTab !== "overview" && activeTab !== "script") {
+        setActiveTab("script");
+      }
       return;
     }
 
@@ -1802,7 +1939,9 @@ export const ContentAnalysisPage: React.FC = () => {
 
     setCurrentAnalysis(null);
     setIsUploadMode(false);
-    setActiveTab("script");
+    if (activeTab !== "overview" && activeTab !== "script") {
+      setActiveTab("script");
+    }
 
     try {
       // 1. Confirm user is authenticated
@@ -1826,7 +1965,7 @@ export const ContentAnalysisPage: React.FC = () => {
         authoritativeRecord.original_script_status
       );
 
-      if (dbScriptStatus === "completed" && authoritativeRecord.original_script) {
+      if (dbScriptStatus === "completed" && hasSavedOriginalScriptResult(authoritativeRecord)) {
         hydrateRealRecordState(authoritativeRecord);
         const updatedItem = contentAnalysisService.mapRecordToHistoryItem(authoritativeRecord);
         setHistoryItems((prev) => [
@@ -1846,13 +1985,16 @@ export const ContentAnalysisPage: React.FC = () => {
         return;
       }
 
-      // 3. Verify all three source analyses are completed before invoking Edge Function
+      // 3. Verify all three source analyses are completed (status AND saved result) before invoking Edge Function
       const audioCompleted =
-        normalizeVisualStatus(authoritativeRecord.audio_analysis_status) === "completed";
+        normalizeVisualStatus(authoritativeRecord.audio_analysis_status) === "completed" &&
+        hasSavedAudioResult(authoritativeRecord);
       const visualCompleted =
-        normalizeVisualStatus(authoritativeRecord.visual_analysis_status) === "completed";
+        normalizeVisualStatus(authoritativeRecord.visual_analysis_status) === "completed" &&
+        hasSavedVisualResult(authoritativeRecord);
       const textCompleted =
-        normalizeVisualStatus(authoritativeRecord.text_extraction_status) === "completed";
+        normalizeVisualStatus(authoritativeRecord.text_extraction_status) === "completed" &&
+        hasSavedTextResult(authoritativeRecord);
 
       if (!audioCompleted || !visualCompleted || !textCompleted) {
         hydrateRealRecordState(authoritativeRecord);
@@ -1881,12 +2023,20 @@ export const ContentAnalysisPage: React.FC = () => {
           const completedRecord = await contentAnalysisService.fetchAnalysisById(targetRecord.id);
           if (activeScriptRunIdRef.current !== targetRecord.id) return;
 
-          const resolvedRecord: ContentAnalysisRecord = completedRecord || {
-            ...authoritativeRecord,
-            original_script: result.original_script || authoritativeRecord.original_script,
-            original_script_status: "completed",
-            original_script_error: null,
-          };
+          const resolvedRecord: ContentAnalysisRecord = completedRecord
+            ? {
+                ...completedRecord,
+                original_script:
+                  completedRecord.original_script ||
+                  result.original_script ||
+                  authoritativeRecord.original_script,
+              }
+            : {
+                ...authoritativeRecord,
+                original_script: result.original_script || authoritativeRecord.original_script,
+                original_script_status: "completed",
+                original_script_error: null,
+              };
 
           hydrateRealRecordState(resolvedRecord);
           const updatedItem = contentAnalysisService.mapRecordToHistoryItem(resolvedRecord);
@@ -2040,12 +2190,16 @@ export const ContentAnalysisPage: React.FC = () => {
           if (isCancelled) return;
 
           if (freshRecord) {
-            hydrateRealRecordState(freshRecord);
+            const mergedRecord: ContentAnalysisRecord = {
+              ...freshRecord,
+              original_script: freshRecord.original_script || statusData.original_script,
+            };
+            hydrateRealRecordState(mergedRecord);
             const updatedHistoryItem =
-              contentAnalysisService.mapRecordToHistoryItem(freshRecord);
+              contentAnalysisService.mapRecordToHistoryItem(mergedRecord);
             setHistoryItems((prev) => [
               updatedHistoryItem,
-              ...prev.filter((p) => p.id !== freshRecord.id),
+              ...prev.filter((p) => p.id !== mergedRecord.id),
             ]);
           } else if (statusData.original_script) {
             setRealAudioRecord((prev) =>
@@ -2155,6 +2309,7 @@ export const ContentAnalysisPage: React.FC = () => {
   // 6. History Selection handler — always loads existing DB values without restarting analysis
   const handleSelectHistoryItem = async (id: string) => {
     const requestId = ++selectionRequestIdRef.current;
+    stopAudioPolling();
     stopVisualPolling();
     stopTextPolling();
     stopScriptPolling();
@@ -2217,6 +2372,7 @@ export const ContentAnalysisPage: React.FC = () => {
       setIsUploadMode(false);
 
       if (
+        activeTab !== "overview" &&
         activeTab !== "visual" &&
         activeTab !== "audio" &&
         activeTab !== "text" &&
@@ -2233,6 +2389,7 @@ export const ContentAnalysisPage: React.FC = () => {
     setHistoryItems((prev) => prev.filter((item) => item.id !== id));
     if (realAudioRecord?.id === id) {
       selectionRequestIdRef.current += 1;
+      stopAudioPolling();
       stopVisualPolling();
       stopTextPolling();
       stopScriptPolling();
@@ -2480,7 +2637,7 @@ export const ContentAnalysisPage: React.FC = () => {
                   <button
                     key={tab.id}
                     type="button"
-                    onClick={() => setActiveTab(tab.id)}
+                    onClick={() => handleOpenTabForSelectedReel(tab.id)}
                     className={cn(
                       "flex items-center gap-2 px-3.5 py-2.5 text-xs sm:text-sm font-semibold border-b-2 transition-all whitespace-nowrap",
                       isActive
@@ -2517,7 +2674,41 @@ export const ContentAnalysisPage: React.FC = () => {
           <div className="transition-all">
             {/* REAL AUDIO RECORD ACTIVE */}
             {realAudioRecord ? (
-              activeTab === "audio" ? (
+              activeTab === "overview" ? (
+                <RealOverviewPipeline
+                  record={realAudioRecord}
+                  signedVideoUrl={signedVideoUrl}
+                  playerRef={playerRef}
+                  onSeek={handleSeekVideo}
+                  isAnalyzingAudio={isAnalyzingAudio}
+                  isAnalyzingVisual={isAnalyzingVisual}
+                  isExtractingText={isExtractingText}
+                  isGeneratingScript={isGeneratingScript}
+                  isRefreshing={isRefreshingRecord}
+                  audioAnalysisError={audioAnalysisError}
+                  visualAnalysisError={visualAnalysisError}
+                  guidedFrameError={guidedFrameError}
+                  textExtractionError={textExtractionError}
+                  originalScriptError={originalScriptError}
+                  originalScriptErrorCode={originalScriptErrorCode}
+                  originalScriptIncompleteSources={originalScriptIncompleteSources}
+                  onViewAudio={handleViewRealAudioAnalysis}
+                  onViewVisual={handleViewRealVisualAnalysis}
+                  onViewText={handleViewTextExtraction}
+                  onViewScript={handleViewOriginalScript}
+                  onAnalyzeAudio={() => handleAnalyzeAudio(realAudioRecord)}
+                  onAnalyzeVisual={() => handleAnalyzeVisual(realAudioRecord)}
+                  onExtractText={() => handleExtractText(realAudioRecord)}
+                  onGenerateOriginalScript={() =>
+                    handleGenerateOriginalScript(realAudioRecord)
+                  }
+                  onRetryOriginalScript={handleRetryOriginalScript}
+                  onRefreshStatus={() =>
+                    void refreshSelectedAnalysisRecord(realAudioRecord.id)
+                  }
+                  onSelectTab={handleOpenTabForSelectedReel}
+                />
+              ) : activeTab === "audio" ? (
                 <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
                   {/* Left Column: Player Preview if video URL is available */}
                   <div className="lg:col-span-4 sticky top-6">
@@ -2676,6 +2867,11 @@ export const ContentAnalysisPage: React.FC = () => {
                       visual: realAudioRecord.visual_analysis_status,
                       text: realAudioRecord.text_extraction_status,
                     }}
+                    sourceAvailability={{
+                      audio: hasSavedAudioResult(realAudioRecord),
+                      visual: hasSavedVisualResult(realAudioRecord),
+                      text: hasSavedTextResult(realAudioRecord),
+                    }}
                     incompleteSourcesError={originalScriptIncompleteSources}
                     sourceMetadata={{
                       audio: realAudioRecord.audio_analysis?.analysis_metadata,
@@ -2687,29 +2883,37 @@ export const ContentAnalysisPage: React.FC = () => {
                     onRetry={handleRetryOriginalScript}
                     isProcessing={isGeneratingScript}
                     onSeek={handleSeekVideo}
-                    onSelectTab={setActiveTab}
+                    onSelectTab={handleOpenTabForSelectedReel}
                   />
                 </div>
               ) : (
-                /* Other Tabs for real uploaded Reel */
+                /* Editing Breakdown / Accuracy Report Tabs for real uploaded Reel */
                 <div className="rounded-2xl border border-card-border bg-card p-8 sm:p-12 text-center space-y-4 shadow-card">
                   <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-primary/10 border border-primary/20 text-primary mx-auto">
                     <Sparkles className="h-7 w-7" />
                   </div>
                   <div className="max-w-md mx-auto space-y-2">
                     <h3 className="text-lg font-bold text-text-primary">
-                      {tabs.find((t) => t.id === activeTab)?.label} Pipeline Integration
+                      {tabs.find((t) => t.id === activeTab)?.label}
                     </h3>
                     <p className="text-xs text-text-secondary leading-relaxed">
-                      This analysis module will be connected in subsequent steps.
-                      Real Audio, Visual Analysis, On-Screen Text Extraction, and Original Reel Script are currently connected and active for this uploaded Reel.
+                      This analysis section has not yet been connected for uploaded Reels.
+                      View your real analysis status and saved results on the Overview or individual module tabs.
                     </p>
                   </div>
                   <div className="pt-2 flex flex-wrap items-center justify-center gap-3">
                     <Button
                       variant="primary"
                       size="sm"
-                      onClick={() => setActiveTab("audio")}
+                      onClick={() => handleOpenTabForSelectedReel("overview")}
+                      leftIcon={<LayoutDashboard className="h-4 w-4" />}
+                    >
+                      View Overview
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleViewRealAudioAnalysis}
                       leftIcon={<Volume2 className="h-4 w-4" />}
                     >
                       View Real Audio Analysis
@@ -2717,7 +2921,7 @@ export const ContentAnalysisPage: React.FC = () => {
                     <Button
                       variant="outline"
                       size="sm"
-                      onClick={() => setActiveTab("visual")}
+                      onClick={handleViewRealVisualAnalysis}
                       leftIcon={<Camera className="h-4 w-4" />}
                     >
                       View Real Visual Analysis
@@ -2725,7 +2929,7 @@ export const ContentAnalysisPage: React.FC = () => {
                     <Button
                       variant="outline"
                       size="sm"
-                      onClick={() => setActiveTab("text")}
+                      onClick={handleViewTextExtraction}
                       leftIcon={<Type className="h-4 w-4" />}
                     >
                       View Text Extraction
@@ -2733,7 +2937,7 @@ export const ContentAnalysisPage: React.FC = () => {
                     <Button
                       variant="outline"
                       size="sm"
-                      onClick={() => setActiveTab("script")}
+                      onClick={handleViewOriginalScript}
                       leftIcon={<FileSpreadsheet className="h-4 w-4" />}
                     >
                       View Original Reel Script

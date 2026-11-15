@@ -304,6 +304,7 @@ class ContentAnalysisService {
   private normalizeRecord(row: any): ContentAnalysisRecord {
     return {
       ...(row as ContentAnalysisRecord),
+      audio_analysis: this.normalizeJsonObject<AudioBackendResult>(row?.audio_analysis),
       visual_analysis: this.normalizeVisualAnalysis(row?.visual_analysis),
       visual_analysis_gemini_step1: this.normalizeJsonObject<VisualGeminiStep1Result>(
         row?.visual_analysis_gemini_step1
@@ -2816,24 +2817,37 @@ class ContentAnalysisService {
         let code: string | undefined;
         let sourceStatuses: OriginalScriptSourceStatuses | undefined;
 
-        if ((error as any).context && typeof (error as any).context?.json === "function") {
-          try {
-            const body = await (error as any).context.json();
-            if (body) {
-              code =
-                body.code ||
-                body.error_code ||
-                (body.error === "SOURCE_ANALYSES_INCOMPLETE"
-                  ? "SOURCE_ANALYSES_INCOMPLETE"
-                  : undefined);
-              if (body.error && typeof body.error === "string") {
-                msg = body.error;
-              } else if (body.message && typeof body.message === "string") {
-                msg = body.message;
+        if ((error as any).context) {
+          const ctx = (error as any).context;
+          if (typeof ctx.clone === "function" || typeof ctx.json === "function") {
+            try {
+              const target = typeof ctx.clone === "function" ? ctx.clone() : ctx;
+              const body = await target.json();
+              if (body) {
+                code =
+                  body.code ||
+                  body.error_code ||
+                  (body.error === "SOURCE_ANALYSES_INCOMPLETE"
+                    ? "SOURCE_ANALYSES_INCOMPLETE"
+                    : undefined);
+                if (body.error && typeof body.error === "string") {
+                  msg = body.error;
+                } else if (body.message && typeof body.message === "string") {
+                  msg = body.message;
+                }
+                sourceStatuses = this.extractSourceStatusesFromPayload(body);
               }
-              sourceStatuses = this.extractSourceStatusesFromPayload(body);
+            } catch {
+              if (typeof ctx.text === "function") {
+                try {
+                  const textBody = await ctx.text();
+                  if (textBody && textBody.trim()) {
+                    msg = textBody.trim();
+                  }
+                } catch {}
+              }
             }
-          } catch {}
+          }
         }
 
         if (!code && typeof msg === "string" && msg.includes("SOURCE_ANALYSES_INCOMPLETE")) {

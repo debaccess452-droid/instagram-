@@ -39,6 +39,7 @@ export interface RealOverviewPipelineProps {
   isAnalyzingVisual: boolean;
   isExtractingText: boolean;
   isGeneratingScript: boolean;
+  isRegeneratingScript?: boolean;
   isRefreshing?: boolean;
   audioAnalysisError: string | null;
   visualAnalysisError: string | null;
@@ -56,6 +57,7 @@ export interface RealOverviewPipelineProps {
   onExtractText: () => void;
   onGenerateOriginalScript: () => void;
   onRetryOriginalScript: () => void;
+  onRegenerateOriginalScript?: () => void;
   onRefreshStatus?: () => void;
   onSelectTab: (tab: AnalysisTabType) => void;
 }
@@ -177,6 +179,7 @@ export const RealOverviewPipeline: React.FC<RealOverviewPipelineProps> = ({
   isAnalyzingVisual,
   isExtractingText,
   isGeneratingScript,
+  isRegeneratingScript = false,
   isRefreshing = false,
   audioAnalysisError,
   visualAnalysisError,
@@ -194,6 +197,7 @@ export const RealOverviewPipeline: React.FC<RealOverviewPipelineProps> = ({
   onExtractText,
   onGenerateOriginalScript,
   onRetryOriginalScript,
+  onRegenerateOriginalScript,
   onRefreshStatus,
   onSelectTab,
 }) => {
@@ -239,16 +243,15 @@ export const RealOverviewPipeline: React.FC<RealOverviewPipelineProps> = ({
   // 4. Original Reel Script status (Completed ONLY when DB status === completed AND original_script exists)
   const rawScriptStatus = normalizeStatus(record.original_script_status);
   const scriptSaved = hasSavedOriginalScriptResult(record);
-  const scriptStatus: OverviewModuleDisplayStatus =
-    rawScriptStatus === "completed" && scriptSaved
-      ? "Completed"
-      : rawScriptStatus === "failed"
-      ? "Failed"
-      : rawScriptStatus === "processing" ||
-        rawScriptStatus === "queued" ||
-        isGeneratingScript
-      ? "Processing"
-      : "Pending";
+  const scriptStatus: OverviewModuleDisplayStatus = isGeneratingScript
+    ? "Processing"
+    : rawScriptStatus === "completed" && scriptSaved
+    ? "Completed"
+    : rawScriptStatus === "failed"
+    ? "Failed"
+    : rawScriptStatus === "processing" || rawScriptStatus === "queued"
+    ? "Processing"
+    : "Pending";
 
   const modules: Array<{
     key: "audio" | "visual" | "text" | "script";
@@ -626,7 +629,9 @@ export const RealOverviewPipeline: React.FC<RealOverviewPipelineProps> = ({
                 <div className="space-y-1 flex-1">
                   <div className="flex items-center gap-2 flex-wrap">
                     <h4 className="text-sm font-bold text-text-primary">
-                      Generating Original Reel Script...
+                      {isRegeneratingScript
+                        ? "Regenerating Original Reel Script..."
+                        : "Generating Original Reel Script..."}
                     </h4>
                     <span className="rounded bg-primary/15 px-2 py-0.5 text-[10px] font-mono font-semibold text-primary border border-primary/30">
                       Processing
@@ -814,6 +819,9 @@ export const RealOverviewPipeline: React.FC<RealOverviewPipelineProps> = ({
             text: record.text_extraction?.analysis_metadata,
           }}
           videoTitle={record.file_name}
+          onRegenerateScript={onRegenerateOriginalScript}
+          isProcessing={isGeneratingScript}
+          isRegenerating={isRegeneratingScript}
           onSeek={onSeek}
           onSelectTab={onSelectTab}
         />

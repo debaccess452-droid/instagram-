@@ -63,7 +63,9 @@ export interface OriginalScriptTableProps {
   };
   onGenerateScript?: () => void;
   onRetry?: () => void;
+  onRegenerateScript?: () => void;
   isProcessing?: boolean;
+  isRegenerating?: boolean;
   onSelectTab?: (tab: AnalysisTabType) => void;
 }
 
@@ -106,7 +108,9 @@ export const OriginalScriptTable: React.FC<OriginalScriptTableProps> = ({
   sourceMetadata,
   onGenerateScript,
   onRetry,
+  onRegenerateScript,
   isProcessing = false,
+  isRegenerating = false,
   onSelectTab,
 }) => {
   const [searchQuery, setSearchQuery] = useState("");
@@ -192,7 +196,8 @@ export const OriginalScriptTable: React.FC<OriginalScriptTableProps> = ({
     const hasValidRealData = Boolean(
       realData && typeof realData === "object" && Array.isArray(realData.rows)
     );
-    const shouldRenderCompletedRealData = hasValidRealData && isCompletedStatus;
+    const shouldRenderCompletedRealData =
+      !isProcessing && hasValidRealData && isCompletedStatus;
 
     // 1. Processing State
     if (
@@ -206,7 +211,9 @@ export const OriginalScriptTable: React.FC<OriginalScriptTableProps> = ({
           </div>
           <div className="max-w-md mx-auto space-y-2">
             <h3 className="text-lg font-bold text-text-primary">
-              Generating Original Reel Script...
+              {isRegenerating
+                ? "Regenerating Original Reel Script..."
+                : "Generating Original Reel Script..."}
             </h3>
             <p className="text-xs text-text-secondary leading-relaxed">
               Synchronizing recorded evidence from Audio Analysis, Visual Analysis,
@@ -630,31 +637,59 @@ export const OriginalScriptTable: React.FC<OriginalScriptTableProps> = ({
                 </div>
               </div>
 
-              {sortedRows.length > 0 && (
+              {(sortedRows.length > 0 || onRegenerateScript) && (
                 <div className="flex items-center gap-2 flex-wrap self-end sm:self-center">
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    onClick={handleCopyRealTable}
-                    leftIcon={
-                      copiedTable ? (
-                        <Check className="h-3.5 w-3.5 text-success" />
-                      ) : (
-                        <Copy className="h-3.5 w-3.5" />
-                      )
-                    }
-                  >
-                    {copiedTable ? "Copied Table" : "Copy Table"}
-                  </Button>
+                  {onRegenerateScript && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={onRegenerateScript}
+                      disabled={isProcessing || !allSourcesCompleted}
+                      leftIcon={
+                        <RotateCcw
+                          className={cn(
+                            "h-3.5 w-3.5",
+                            isProcessing && "animate-spin"
+                          )}
+                        />
+                      }
+                      title={
+                        !allSourcesCompleted
+                          ? "All three source analyses (Audio, Visual, and Text Extraction) must be completed to regenerate."
+                          : "Regenerate Original Reel Script from saved Audio, Visual, and Text Extraction analyses"
+                      }
+                    >
+                      {isProcessing ? "Regenerating..." : "Regenerate Script"}
+                    </Button>
+                  )}
 
-                  <Button
-                    variant="primary"
-                    size="sm"
-                    onClick={handleExportRealCSV}
-                    leftIcon={<Download className="h-3.5 w-3.5" />}
-                  >
-                    Export CSV
-                  </Button>
+                  {sortedRows.length > 0 && (
+                    <>
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        onClick={handleCopyRealTable}
+                        leftIcon={
+                          copiedTable ? (
+                            <Check className="h-3.5 w-3.5 text-success" />
+                          ) : (
+                            <Copy className="h-3.5 w-3.5" />
+                          )
+                        }
+                      >
+                        {copiedTable ? "Copied Table" : "Copy Table"}
+                      </Button>
+
+                      <Button
+                        variant="primary"
+                        size="sm"
+                        onClick={handleExportRealCSV}
+                        leftIcon={<Download className="h-3.5 w-3.5" />}
+                      >
+                        Export CSV
+                      </Button>
+                    </>
+                  )}
                 </div>
               )}
             </div>

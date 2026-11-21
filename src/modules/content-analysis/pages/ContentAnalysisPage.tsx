@@ -164,6 +164,7 @@ export const ContentAnalysisPage: React.FC = () => {
   const [textExtractionError, setTextExtractionError] = useState<string | null>(null);
   const [textProgressMessage, setTextProgressMessage] = useState<string | null>(null);
   const [isGeneratingScript, setIsGeneratingScript] = useState<boolean>(false);
+  const [isRegeneratingScript, setIsRegeneratingScript] = useState<boolean>(false);
   const [originalScriptError, setOriginalScriptError] = useState<string | null>(null);
   const [originalScriptErrorCode, setOriginalScriptErrorCode] = useState<string | null>(null);
   const [originalScriptIncompleteSources, setOriginalScriptIncompleteSources] =
@@ -364,6 +365,7 @@ export const ContentAnalysisPage: React.FC = () => {
       activeScriptRunIdRef.current = null;
       isGeneratingScriptRef.current = false;
       setIsGeneratingScript(false);
+      setIsRegeneratingScript(false);
       setOriginalScriptError(null);
       setOriginalScriptErrorCode(null);
       setOriginalScriptIncompleteSources(null);
@@ -378,6 +380,7 @@ export const ContentAnalysisPage: React.FC = () => {
       activeScriptRunIdRef.current = null;
       isGeneratingScriptRef.current = false;
       setIsGeneratingScript(false);
+      setIsRegeneratingScript(false);
       setOriginalScriptError(
         record.original_script_error || "Previous Original Reel Script generation failed."
       );
@@ -388,6 +391,7 @@ export const ContentAnalysisPage: React.FC = () => {
       activeScriptRunIdRef.current = null;
       isGeneratingScriptRef.current = false;
       setIsGeneratingScript(false);
+      setIsRegeneratingScript(false);
       setOriginalScriptError(null);
       setOriginalScriptErrorCode(null);
       setOriginalScriptIncompleteSources(null);
@@ -562,6 +566,7 @@ export const ContentAnalysisPage: React.FC = () => {
     setIsAnalyzingVisual(false);
     setIsExtractingText(false);
     setIsGeneratingScript(false);
+    setIsRegeneratingScript(false);
     setVisualProgressMessage(null);
     setSubmittedVisualFrames(null);
     setTextProgressMessage(null);
@@ -1902,14 +1907,21 @@ export const ContentAnalysisPage: React.FC = () => {
 
   // 11. Independent Original Reel Script generation via 'generate-original-script' (explicit action only)
   const handleGenerateOriginalScript = async (
-    recordToGenerate?: ContentAnalysisRecord | null
+    recordToGenerate?: ContentAnalysisRecord | null,
+    options?: { forceRegenerate?: boolean }
   ) => {
     const targetRecord = recordToGenerate || realAudioRecord;
     if (!targetRecord?.id) return;
 
-    // Never regenerate an already-completed script with saved result
+    const forceRegenerate = Boolean(options?.forceRegenerate);
+
+    // Never auto-regenerate an already-completed script unless explicitly requested via Regenerate Script
     const initialStatus = normalizeVisualStatus(targetRecord.original_script_status);
-    if (initialStatus === "completed" && hasSavedOriginalScriptResult(targetRecord)) {
+    if (
+      !forceRegenerate &&
+      initialStatus === "completed" &&
+      hasSavedOriginalScriptResult(targetRecord)
+    ) {
       hydrateRealRecordState(targetRecord);
       setCurrentAnalysis(null);
       setIsUploadMode(false);
@@ -1932,6 +1944,7 @@ export const ContentAnalysisPage: React.FC = () => {
     isGeneratingScriptRef.current = true;
     stopScriptPolling();
     setIsGeneratingScript(true);
+    setIsRegeneratingScript(forceRegenerate);
     setOriginalScriptError(null);
     setOriginalScriptErrorCode(null);
     setOriginalScriptIncompleteSources(null);
@@ -1965,7 +1978,11 @@ export const ContentAnalysisPage: React.FC = () => {
         authoritativeRecord.original_script_status
       );
 
-      if (dbScriptStatus === "completed" && hasSavedOriginalScriptResult(authoritativeRecord)) {
+      if (
+        !forceRegenerate &&
+        dbScriptStatus === "completed" &&
+        hasSavedOriginalScriptResult(authoritativeRecord)
+      ) {
         hydrateRealRecordState(authoritativeRecord);
         const updatedItem = contentAnalysisService.mapRecordToHistoryItem(authoritativeRecord);
         setHistoryItems((prev) => [
@@ -2011,29 +2028,66 @@ export const ContentAnalysisPage: React.FC = () => {
       }
 
       // 4. Invoke deployed Supabase Edge Function 'generate-original-script'
-      const result = await contentAnalysisService.generateOriginalScript(targetRecord.id);
+      const result = await contentAnalysisService.generateOriginalScript(
+        targetRecord.id,
+        forceRegenerate ? { forceRegenerate: true } : undefined
+      );
       if (activeScriptRunIdRef.current !== targetRecord.id) return;
 
       if (result.success) {
         isGeneratingScriptRef.current = false;
         const newStatus: OriginalScriptStatus =
           result.status || (result.original_script ? "completed" : "processing");
+        const normalizedNewStatus = normalizeVisualStatus(newStatus);
 
-        if (normalizeVisualStatus(newStatus) === "completed" || result.original_script) {
+        if (
+          normalizedNewStatus === "completed" ||
+          (Boolean(result.original_script) &&
+            normalizedNewStatus !== "processing" &&
+            normalizedNewStatus !== "queued")
+        ) {
           const completedRecord = await contentAnalysisService.fetchAnalysisById(targetRecord.id);
           if (activeScriptRunIdRef.current !== targetRecord.id) return;
+
+          const completedRecordStatus = normalizeVisualStatus(
+            completedRecord?.original_script_status
+          );
+
+          // If DB explicitly transitioned to processing (or queued) and no direct script payload came back, let 5s poller finish
+          if (
+            completedRecord &&
+            (completedRecordStatus === "processing" || completedRecordStatus === "queued") &&
+            !result.original_script
+          ) {
+            setRealAudioRecord((prev) =>
+              prev && prev.id === targetRecord.id
+                ? {
+                    ...completedRecord,
+                    original_script: forceRegenerate ? null : completedRecord.original_script,
+                  }
+                : prev
+            );
+            return;
+          }
+
+          const resolvedOriginalScript = forceRegenerate
+            ? result.original_script || completedRecord?.original_script || null
+            : completedRecord?.original_script ||
+              result.original_script ||
+              authoritativeRecord.original_script;
 
           const resolvedRecord: ContentAnalysisRecord = completedRecord
             ? {
                 ...completedRecord,
-                original_script:
-                  completedRecord.original_script ||
-                  result.original_script ||
-                  authoritativeRecord.original_script,
+                original_script: resolvedOriginalScript,
+                original_script_status:
+                  completedRecordStatus === "completed" || resolvedOriginalScript
+                    ? "completed"
+                    : completedRecord.original_script_status,
               }
             : {
                 ...authoritativeRecord,
-                original_script: result.original_script || authoritativeRecord.original_script,
+                original_script: resolvedOriginalScript,
                 original_script_status: "completed",
                 original_script_error: null,
               };
@@ -2049,6 +2103,7 @@ export const ContentAnalysisPage: React.FC = () => {
             prev && prev.id === targetRecord.id
               ? {
                   ...prev,
+                  original_script: forceRegenerate ? null : prev.original_script,
                   original_script_status: newStatus,
                   original_script_error: null,
                 }
@@ -2058,7 +2113,12 @@ export const ContentAnalysisPage: React.FC = () => {
           setHistoryItems((prev) =>
             prev.map((item) =>
               item.id === targetRecord.id
-                ? { ...item, originalScriptStatus: newStatus, originalScriptError: null }
+                ? {
+                    ...item,
+                    originalScript: forceRegenerate ? null : item.originalScript,
+                    originalScriptStatus: newStatus,
+                    originalScriptError: null,
+                  }
                 : item
             )
           );
@@ -2067,6 +2127,7 @@ export const ContentAnalysisPage: React.FC = () => {
         activeScriptRunIdRef.current = null;
         isGeneratingScriptRef.current = false;
         setIsGeneratingScript(false);
+        setIsRegeneratingScript(false);
 
         const errorMsg =
           result.error || "Original Reel Script generation was unable to complete.";
@@ -2090,6 +2151,7 @@ export const ContentAnalysisPage: React.FC = () => {
             prev && prev.id === targetRecord.id
               ? {
                   ...prev,
+                  original_script: forceRegenerate ? null : prev.original_script,
                   original_script_status: "failed",
                   original_script_error: errorMsg,
                 }
@@ -2101,6 +2163,7 @@ export const ContentAnalysisPage: React.FC = () => {
               item.id === targetRecord.id
                 ? {
                     ...item,
+                    originalScript: forceRegenerate ? null : item.originalScript,
                     originalScriptStatus: "failed",
                     originalScriptError: errorMsg,
                   }
@@ -2117,6 +2180,7 @@ export const ContentAnalysisPage: React.FC = () => {
       activeScriptRunIdRef.current = null;
       isGeneratingScriptRef.current = false;
       setIsGeneratingScript(false);
+      setIsRegeneratingScript(false);
       setOriginalScriptErrorCode(null);
       setOriginalScriptIncompleteSources(null);
       setOriginalScriptError(msg);
@@ -2125,6 +2189,7 @@ export const ContentAnalysisPage: React.FC = () => {
         prev && prev.id === targetRecord.id
           ? {
               ...prev,
+              original_script: forceRegenerate ? null : prev.original_script,
               original_script_status: "failed",
               original_script_error: msg,
             }
@@ -2136,6 +2201,7 @@ export const ContentAnalysisPage: React.FC = () => {
           item.id === targetRecord.id
             ? {
                 ...item,
+                originalScript: forceRegenerate ? null : item.originalScript,
                 originalScriptStatus: "failed",
                 originalScriptError: msg,
               }
@@ -2148,7 +2214,14 @@ export const ContentAnalysisPage: React.FC = () => {
   // 12. Retry Original Reel Script generation (only used after failed generation)
   const handleRetryOriginalScript = () => {
     if (realAudioRecord) {
-      handleGenerateOriginalScript(realAudioRecord);
+      void handleGenerateOriginalScript(realAudioRecord);
+    }
+  };
+
+  // 12b. Explicit Regenerate Original Reel Script (invokes Edge Function with forceRegenerate: true)
+  const handleRegenerateOriginalScript = () => {
+    if (realAudioRecord) {
+      void handleGenerateOriginalScript(realAudioRecord, { forceRegenerate: true });
     }
   };
 
@@ -2329,6 +2402,7 @@ export const ContentAnalysisPage: React.FC = () => {
     setIsAnalyzingVisual(false);
     setIsExtractingText(false);
     setIsGeneratingScript(false);
+    setIsRegeneratingScript(false);
     setVisualProgressMessage(null);
     setTextProgressMessage(null);
     setVisualAnalysisError(null);
@@ -2409,6 +2483,7 @@ export const ContentAnalysisPage: React.FC = () => {
       setIsAnalyzingVisual(false);
       setIsExtractingText(false);
       setIsGeneratingScript(false);
+      setIsRegeneratingScript(false);
       setVisualProgressMessage(null);
       setTextProgressMessage(null);
       setOriginalScriptError(null);
@@ -2684,6 +2759,7 @@ export const ContentAnalysisPage: React.FC = () => {
                   isAnalyzingVisual={isAnalyzingVisual}
                   isExtractingText={isExtractingText}
                   isGeneratingScript={isGeneratingScript}
+                  isRegeneratingScript={isRegeneratingScript}
                   isRefreshing={isRefreshingRecord}
                   audioAnalysisError={audioAnalysisError}
                   visualAnalysisError={visualAnalysisError}
@@ -2703,6 +2779,7 @@ export const ContentAnalysisPage: React.FC = () => {
                     handleGenerateOriginalScript(realAudioRecord)
                   }
                   onRetryOriginalScript={handleRetryOriginalScript}
+                  onRegenerateOriginalScript={handleRegenerateOriginalScript}
                   onRefreshStatus={() =>
                     void refreshSelectedAnalysisRecord(realAudioRecord.id)
                   }
@@ -2881,7 +2958,9 @@ export const ContentAnalysisPage: React.FC = () => {
                     videoTitle={realAudioRecord.file_name}
                     onGenerateScript={() => handleGenerateOriginalScript(realAudioRecord)}
                     onRetry={handleRetryOriginalScript}
+                    onRegenerateScript={handleRegenerateOriginalScript}
                     isProcessing={isGeneratingScript}
+                    isRegenerating={isRegeneratingScript}
                     onSeek={handleSeekVideo}
                     onSelectTab={handleOpenTabForSelectedReel}
                   />

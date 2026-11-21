@@ -2775,7 +2775,10 @@ class ContentAnalysisService {
    * Invokes the deployed Supabase Edge Function 'generate-original-script'
    * for the given existing analysisId using the authenticated session.
    */
-  public async generateOriginalScript(analysisId: string): Promise<{
+  public async generateOriginalScript(
+    analysisId: string,
+    options?: { forceRegenerate?: boolean }
+  ): Promise<{
     success: boolean;
     status?: OriginalScriptStatus;
     code?: string;
@@ -2805,10 +2808,17 @@ class ContentAnalysisService {
         };
       }
 
+      const body: { analysisId: string; forceRegenerate?: boolean } = {
+        analysisId,
+      };
+      if (options?.forceRegenerate) {
+        body.forceRegenerate = true;
+      }
+
       const { data, error } = await supabase.functions.invoke(
         "generate-original-script",
         {
-          body: { analysisId },
+          body,
         }
       );
 

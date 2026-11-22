@@ -497,16 +497,12 @@ export const AudioAnalysis: React.FC<AudioAnalysisProps> = ({
             </div>
 
             <div className="space-y-1 pt-0.5">
-              <p className="text-sm font-semibold text-text-primary">
-                {bgMusic?.detected
-                  ? "Background music detected."
-                  : "No background music detected."}
+              <p className="text-sm font-semibold text-text-primary leading-relaxed">
+                {bgMusic?.description?.trim() ||
+                  (bgMusic?.detected
+                    ? "Background music detected."
+                    : "No background music detected.")}
               </p>
-              {bgMusic?.description ? (
-                <p className="text-xs text-text-secondary leading-relaxed">
-                  {bgMusic.description}
-                </p>
-              ) : null}
             </div>
           </div>
 
